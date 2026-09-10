@@ -167,7 +167,7 @@ async def task_name(message: Message, state: FSMContext):
         return
     await state.update_data(task_name=name)
     await state.set_state(Flow.task_sample)
-    await message.answer("Введите число кандидатов для теста на каждый аккаунт (например, `10`) или `все` для полной базы. Для первого запуска рекомендую 10.", parse_mode="Markdown")
+    await message.answer("Введите общее число кандидатов для теста (например, `10`) или `все` для полной базы. Для первого запуска рекомендую 10 на всю задачу.", parse_mode="Markdown")
 
 
 @dp.message(Flow.task_sample)
@@ -175,15 +175,15 @@ async def task_sample(message: Message, state: FSMContext):
     if await reject_if_needed(message): return
     raw = (message.text or "").strip().casefold()
     try:
-        sample_per_account = 0 if raw in {"все", "all"} else int(raw)
-        if not 0 <= sample_per_account <= 100:
+        sample_limit = 0 if raw in {"все", "all"} else int(raw)
+        if not 0 <= sample_limit <= 100:
             raise ValueError
     except ValueError:
         await message.answer("Введите число от 1 до 100 или слово «все».")
         return
     data = await state.get_data()
-    task_id, selected = store.create_task(data["task_name"], sample_per_account)
-    scope = "полной базы" if sample_per_account == 0 else f"теста: до {sample_per_account} на аккаунт"
+    task_id, selected = store.create_task(data["task_name"], sample_limit)
+    scope = "полной базы" if sample_limit == 0 else f"теста: до {sample_limit} всего"
     store.audit("task_created", f"Создана задача #{task_id}: {data['task_name']}; {scope}; выбрано {selected}")
     await state.clear()
     await message.answer(f"✅ Задача #{task_id} создана как черновик. Выбрано кандидатов: {selected} ({scope}). Проверьте её в разделе «Очередь и задачи».", reply_markup=main_menu())
