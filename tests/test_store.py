@@ -16,9 +16,10 @@ class StoreTests(unittest.TestCase):
             decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
             store.record_decision(account["id"], 123, "name", "Name", decision)
             store.record_decision(account["id"], 123, "name", "Name", decision)
-            task_id = store.create_task("Review first")
+            task_id, selected = store.create_task("Review first", 10)
             task = store.tasks()[0]
             self.assertEqual(task["id"], task_id)
+            self.assertEqual(selected, 1)
             self.assertEqual(task["enabled"], 0)
             self.assertEqual(task["queued"], 1)
             self.assertEqual(store.setting("global_paused"), "1")

@@ -31,6 +31,7 @@ class Flow(StatesGroup):
     remove_stop_word = State()
     template = State()
     task_name = State()
+    task_sample = State()
     limit = State()
     delay = State()
     hours = State()
@@ -153,17 +154,39 @@ async def queue(query: CallbackQuery):
 async def task_new(query: CallbackQuery, state: FSMContext):
     if await reject_if_needed(query): return
     await state.set_state(Flow.task_name)
-    await query.message.answer("Введите название задачи. В неё попадёт только текущая проверенная выборка кандидатов; новые кандидаты автоматически не добавятся.")
+    await query.message.answer("Введите название задачи. Затем бот попросит размер тестовой выборки.")
     await query.answer()
 
 
 @dp.message(Flow.task_name)
 async def task_name(message: Message, state: FSMContext):
     if await reject_if_needed(message): return
-    task_id = store.create_task(message.text or "")
-    store.audit("task_created", f"Создана задача #{task_id}: {message.text}")
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Название не должно быть пустым.")
+        return
+    await state.update_data(task_name=name)
+    await state.set_state(Flow.task_sample)
+    await message.answer("Введите число кандидатов для теста на каждый аккаунт (например, `10`) или `все` для полной базы. Для первого запуска рекомендую 10.", parse_mode="Markdown")
+
+
+@dp.message(Flow.task_sample)
+async def task_sample(message: Message, state: FSMContext):
+    if await reject_if_needed(message): return
+    raw = (message.text or "").strip().casefold()
+    try:
+        sample_per_account = 0 if raw in {"все", "all"} else int(raw)
+        if not 0 <= sample_per_account <= 100:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите число от 1 до 100 или слово «все».")
+        return
+    data = await state.get_data()
+    task_id, selected = store.create_task(data["task_name"], sample_per_account)
+    scope = "полной базы" if sample_per_account == 0 else f"теста: до {sample_per_account} на аккаунт"
+    store.audit("task_created", f"Создана задача #{task_id}: {data['task_name']}; {scope}; выбрано {selected}")
     await state.clear()
-    await message.answer(f"✅ Задача #{task_id} создана как черновик. Проверьте её в разделе «Очередь и задачи».", reply_markup=main_menu())
+    await message.answer(f"✅ Задача #{task_id} создана как черновик. Выбрано кандидатов: {selected} ({scope}). Проверьте её в разделе «Очередь и задачи».", reply_markup=main_menu())
 
 
 @dp.callback_query(F.data.startswith("task_enable:"))

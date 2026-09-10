@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -141,6 +142,9 @@ class FollowupService:
             if not row["work_start_hour"] <= local_hour < row["work_end_hour"]:
                 continue
             if self.store.sent_today(row["account_id"], row["task_id"]) >= row["max_per_account_per_day"]:
+                continue
+            last_sent = self.store.last_sent_at(row["account_id"])
+            if last_sent and datetime.now(timezone.utc) - last_sent.astimezone(timezone.utc) < timedelta(seconds=row["delay_seconds"]):
                 continue
             self.store.mark_queue(row["id"], "sending")
             result = await self.preflight_and_send(row)

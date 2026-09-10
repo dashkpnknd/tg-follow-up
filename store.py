@@ -193,7 +193,13 @@ class Store:
         with self.connect() as db:
             return db.execute("SELECT COUNT(*) c FROM queue WHERE account_id=? AND status='sent' AND updated_at>=date('now') AND (? IS NULL OR task_id=?)", (account_id, task_id, task_id)).fetchone()["c"]
 
-    def create_task(self, name: str, template: str | None = None) -> int:
+    def last_sent_at(self, account_id: int) -> datetime | None:
+        with self.connect() as db:
+            row = db.execute("SELECT MAX(updated_at) AS value FROM queue WHERE account_id=? AND status='sent'", (account_id,)).fetchone()
+        return datetime.fromisoformat(row["value"]) if row and row["value"] else None
+
+    def create_task(self, name: str, sample_per_account: int, template: str | None = None) -> tuple[int, int]:
+        """Snapshot candidates into a test sample (or full task) without adding later scans."""
         effective_template = template or self.setting("followup_template") or DEFAULT_FOLLOWUP
         max_per_day = int(self.setting("task_max_per_account_per_day", "20") or "20")
         delay = int(self.setting("task_delay_seconds", "120") or "120")
@@ -203,9 +209,16 @@ class Store:
             cursor = db.execute("""INSERT INTO tasks(name,template,max_per_account_per_day,delay_seconds,work_start_hour,work_end_hour,created_at,updated_at)
                 VALUES(?,?,?,?,?,?,?,?)""", (name.strip()[:100], effective_template, max_per_day, delay, work_start, work_end, utcnow(), utcnow()))
             task_id = cursor.lastrowid
-            # A task is an explicit snapshot of current candidates. New scans never add people to it automatically.
-            db.execute("UPDATE queue SET task_id=?,updated_at=? WHERE status='pending' AND task_id IS NULL", (task_id, utcnow()))
-            return task_id
+            if sample_per_account == 0:
+                result = db.execute("UPDATE queue SET task_id=?,updated_at=? WHERE status='pending' AND task_id IS NULL", (task_id, utcnow()))
+            else:
+                result = db.execute("""UPDATE queue SET task_id=?,updated_at=? WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY planned_at,id) AS number
+                        FROM queue WHERE status='pending' AND task_id IS NULL
+                    ) WHERE number <= ?
+                )""", (task_id, utcnow(), sample_per_account))
+            return task_id, result.rowcount
 
     def tasks(self):
         with self.connect() as db:
