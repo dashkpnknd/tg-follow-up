@@ -82,6 +82,9 @@ async def send_menu(message: Message, text: str = "Панель управлен
 
 @dp.message(CommandStart())
 async def start(message: Message):
+    if not ADMIN_CHAT_ID and not ADMINS:
+        await message.answer("Бот запущен, но доступ к управлению ещё не настроен. Добавьте бота администратором в управляющую группу и передайте её числовой ID — тогда доступ автоматически получат все администраторы группы.")
+        return
     if await reject_if_needed(message): return
     await send_menu(message, "Бот готов. Отправка выключена и поставлена на глобальную паузу.")
 
@@ -399,8 +402,6 @@ async def delivery_loop():
 
 
 async def main():
-    if not ADMIN_CHAT_ID and not ADMINS:
-        raise RuntimeError("Set ADMIN_CHAT_ID (preferred) or ADMIN_IDS before running the bot")
     bot = Bot(os.environ["BOT_TOKEN"])
     asyncio.create_task(delivery_loop())
     await dp.start_polling(bot)
