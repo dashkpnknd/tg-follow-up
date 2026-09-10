@@ -167,7 +167,7 @@ async def task_name(message: Message, state: FSMContext):
         return
     await state.update_data(task_name=name)
     await state.set_state(Flow.task_sample)
-    await message.answer("Введите общее число кандидатов для теста (например, `10`) или `все` для полной базы. Для первого запуска рекомендую 10 на всю задачу.", parse_mode="Markdown")
+    await message.answer("Введите общее число кандидатов для задачи или `все` для полной текущей базы.", parse_mode="Markdown")
 
 
 @dp.message(Flow.task_sample)
@@ -176,10 +176,10 @@ async def task_sample(message: Message, state: FSMContext):
     raw = (message.text or "").strip().casefold()
     try:
         sample_limit = 0 if raw in {"все", "all"} else int(raw)
-        if not 0 <= sample_limit <= 100:
+        if not 0 <= sample_limit <= 1_000_000:
             raise ValueError
     except ValueError:
-        await message.answer("Введите число от 1 до 100 или слово «все».")
+        await message.answer("Введите положительное число или слово «все».")
         return
     data = await state.get_data()
     task_id, selected = store.create_task(data["task_name"], sample_limit)
