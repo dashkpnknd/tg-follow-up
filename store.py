@@ -45,7 +45,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS tasks (
               id INTEGER PRIMARY KEY, name TEXT NOT NULL, template TEXT NOT NULL,
               enabled INTEGER NOT NULL DEFAULT 0, max_per_account_per_day INTEGER NOT NULL DEFAULT 20,
-              delay_seconds INTEGER NOT NULL DEFAULT 120, work_start_hour INTEGER NOT NULL DEFAULT 10,
+              delay_seconds INTEGER NOT NULL DEFAULT 600, max_delay_seconds INTEGER NOT NULL DEFAULT 900, work_start_hour INTEGER NOT NULL DEFAULT 10,
               work_end_hour INTEGER NOT NULL DEFAULT 20, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS audit_log (
               id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, account_id INTEGER, peer_id INTEGER,
@@ -54,14 +54,19 @@ class Store:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(queue)")}
             if "task_id" not in columns:
                 db.execute("ALTER TABLE queue ADD COLUMN task_id INTEGER REFERENCES tasks(id)")
+            task_columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
+            if "max_delay_seconds" not in task_columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN max_delay_seconds INTEGER NOT NULL DEFAULT 900")
             self.set_default(db, "global_paused", "1")
             self.set_default(db, "delivery_enabled", "0")
             self.set_default(db, "followup_template", DEFAULT_FOLLOWUP)
             self.set_default(db, "task_max_per_account_per_day", "20")
-            self.set_default(db, "task_delay_seconds", "120")
+            self.set_default(db, "task_delay_seconds", "600")
+            self.set_default(db, "task_max_delay_seconds", "900")
             self.set_default(db, "task_work_start_hour", "10")
             self.set_default(db, "task_work_end_hour", "20")
             self.set_default(db, "timezone", "Europe/Moscow")
+            self.set_default(db, "auto_scan_enabled", "1")
             for phrase in DEFAULT_STOP_WORDS:
                 db.execute("INSERT OR IGNORE INTO stop_words(phrase,created_at) VALUES(?,?)", (phrase, utcnow()))
 
@@ -176,7 +181,7 @@ class Store:
     def pending(self, limit: int = 50):
         with self.connect() as db:
             return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,t.name task_name,t.template,
-                 t.max_per_account_per_day,t.delay_seconds,t.work_start_hour,t.work_end_hour
+                 t.max_per_account_per_day,t.delay_seconds,t.max_delay_seconds,t.work_start_hour,t.work_end_hour
                  FROM queue q JOIN accounts a ON a.id=q.account_id JOIN tasks t ON t.id=q.task_id
                  WHERE q.status='pending' AND a.enabled=1 AND t.enabled=1 ORDER BY q.planned_at LIMIT ?""", (limit,)).fetchall()
 
@@ -202,12 +207,13 @@ class Store:
         """Snapshot a small global test sample (or full task) without later scans."""
         effective_template = template or self.setting("followup_template") or DEFAULT_FOLLOWUP
         max_per_day = int(self.setting("task_max_per_account_per_day", "20") or "20")
-        delay = int(self.setting("task_delay_seconds", "120") or "120")
+        delay = int(self.setting("task_delay_seconds", "600") or "600")
+        max_delay = int(self.setting("task_max_delay_seconds", "900") or "900")
         work_start = int(self.setting("task_work_start_hour", "10") or "10")
         work_end = int(self.setting("task_work_end_hour", "20") or "20")
         with self.connect() as db:
-            cursor = db.execute("""INSERT INTO tasks(name,template,max_per_account_per_day,delay_seconds,work_start_hour,work_end_hour,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?)""", (name.strip()[:100], effective_template, max_per_day, delay, work_start, work_end, utcnow(), utcnow()))
+            cursor = db.execute("""INSERT INTO tasks(name,template,max_per_account_per_day,delay_seconds,max_delay_seconds,work_start_hour,work_end_hour,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?)""", (name.strip()[:100], effective_template, max_per_day, delay, max(max_delay, delay), work_start, work_end, utcnow(), utcnow()))
             task_id = cursor.lastrowid
             if sample_limit == 0:
                 result = db.execute("UPDATE queue SET task_id=?,updated_at=? WHERE status='pending' AND task_id IS NULL", (task_id, utcnow()))

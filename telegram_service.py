@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -144,8 +145,13 @@ class FollowupService:
             if self.store.sent_today(row["account_id"], row["task_id"]) >= row["max_per_account_per_day"]:
                 continue
             last_sent = self.store.last_sent_at(row["account_id"])
-            if last_sent and datetime.now(timezone.utc) - last_sent.astimezone(timezone.utc) < timedelta(seconds=row["delay_seconds"]):
-                continue
+            if last_sent:
+                # Deterministic jitter gives every account a stable, auditable
+                # 10–15 minute pause without storing a second mutable timer.
+                spread = max(0, row["max_delay_seconds"] - row["delay_seconds"])
+                jitter = int.from_bytes(hashlib.sha256(f"{row['account_id']}:{last_sent.isoformat()}".encode()).digest()[:4], "big") % (spread + 1)
+                if datetime.now(timezone.utc) - last_sent.astimezone(timezone.utc) < timedelta(seconds=row["delay_seconds"] + jitter):
+                    continue
             self.store.mark_queue(row["id"], "sending")
             result = await self.preflight_and_send(row)
             if result == "sent":

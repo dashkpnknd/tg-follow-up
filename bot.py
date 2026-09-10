@@ -324,7 +324,7 @@ async def settings(query: CallbackQuery):
             f"Пауза: {'да' if store.setting('global_paused') == '1' else 'нет'}\n"
             f"Доставка разрешена: {'да' if store.setting('delivery_enabled') == '1' else 'нет'}\n"
             f"Лимит на аккаунт/день: {store.setting('task_max_per_account_per_day')}\n"
-            f"Интервал: {store.setting('task_delay_seconds')} сек.\n"
+            f"Пауза с одного аккаунта: {int(store.setting('task_delay_seconds') or '600') // 60}–{int(store.setting('task_max_delay_seconds') or '900') // 60} мин.\n"
             f"Рабочие часы: {store.setting('task_work_start_hour')}–{store.setting('task_work_end_hour')} ({store.setting('timezone')})")
     await query.message.answer(text, reply_markup=kb(("Лимит", "setting_limit"), ("Интервал", "setting_delay"), ("Рабочие часы", "setting_hours"), ("Разрешить доставку", "delivery_confirm"), ("Снять паузу", "resume_confirm"), ("◀️ Меню", "menu")))
     await query.answer()
@@ -333,7 +333,7 @@ async def settings(query: CallbackQuery):
 @dp.callback_query(F.data.in_({"setting_limit", "setting_delay", "setting_hours"}))
 async def setting_input(query: CallbackQuery, state: FSMContext):
     if await reject_if_needed(query): return
-    mapping = {"setting_limit": (Flow.limit, "Введите целый дневной лимит на один аккаунт."), "setting_delay": (Flow.delay, "Введите интервал между сообщениями в секундах (не меньше 60)."), "setting_hours": (Flow.hours, "Введите начало и конец рабочих часов через пробел, например: 10 20")}
+    mapping = {"setting_limit": (Flow.limit, "Введите целый дневной лимит на один аккаунт."), "setting_delay": (Flow.delay, "Введите минимальную и максимальную паузу в минутах через пробел, например: 10 15."), "setting_hours": (Flow.hours, "Введите начало и конец рабочих часов через пробел, например: 10 20")}
     target, text = mapping[query.data]
     await state.set_state(target)
     await query.message.answer(text)
@@ -355,11 +355,11 @@ async def setting_limit(message: Message, state: FSMContext):
 async def setting_delay(message: Message, state: FSMContext):
     if await reject_if_needed(message): return
     try:
-        value = int(message.text or "")
-        if value < 60: raise ValueError
+        minimum, maximum = map(int, (message.text or "").split())
+        if not 1 <= minimum <= maximum <= 24 * 60: raise ValueError
     except ValueError:
-        await message.answer("Введите число не меньше 60."); return
-    store.set_setting("task_delay_seconds", str(value)); await state.clear(); await message.answer("✅ Интервал сохранён для новых задач.")
+        await message.answer("Введите две величины в минутах, например: 10 15."); return
+    store.set_setting("task_delay_seconds", str(minimum * 60)); store.set_setting("task_max_delay_seconds", str(maximum * 60)); await state.clear(); await message.answer("✅ Пауза сохранена для новых задач.")
 
 
 @dp.message(Flow.hours)
@@ -427,11 +427,24 @@ async def delivery_loop():
         await asyncio.sleep(30)
 
 
+async def scan_loop():
+    """Keep new dialogs visible; scanning does not turn on delivery or a task."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            if store.setting("auto_scan_enabled") == "1":
+                await service.scan_all()
+        except Exception:
+            log.exception("Automatic dialog scan failed")
+        await asyncio.sleep(int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))
+
+
 async def main():
     if ACCESS_MODE not in {"public", "group_admins"}:
         raise RuntimeError("ACCESS_MODE must be public or group_admins")
     bot = Bot(os.environ["BOT_TOKEN"])
     asyncio.create_task(delivery_loop())
+    asyncio.create_task(scan_loop())
     await dp.start_polling(bot)
 
 
