@@ -59,7 +59,7 @@ async def start(message: Message):
 async def import_accounts(query: CallbackQuery):
     if await reject_if_needed(query): return
     try:
-        count = service.import_dialoghub_accounts(os.environ["DIALOGHUB_DB_PATH"], os.environ["ACCOUNT_SESSIONS_DIR"])
+        count = service.import_dialoghub_accounts(os.environ["DIALOGHUB_DB_PATH"], os.environ["ACCOUNT_SESSIONS_DIR"], os.getenv("ACCOUNT_TITLE_PREFIX", ""))
         await query.message.answer(f"✅ Добавлено/обновлено аккаунтов DialogHub: {count}. Никакая отправка не запускалась.")
     except Exception:
         log.exception("DialogHub import failed")

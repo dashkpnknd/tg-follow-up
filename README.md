@@ -4,7 +4,7 @@ Safe Telegram follow-up bot for existing DialogHub accounts. It imports account 
 
 ## What is implemented
 
-- DialogHub account import from its SQLite registry; import does not connect to or send from any account.
+- DialogHub account import from its SQLite registry. It takes a SQLite backup of each Pyrogram session into the bot's own `sessions/` directory; it does not connect to or send from an account during import.
 - Conservative classification: application markers `@gelikky` / `@LocalTraffic`, editable refusal words, any client reply, 48-hour threshold, blacklist, and prior `Фиксирую отказ?` in Telegram history.
 - Durable SQLite queue, per-dialog state, blacklist and audit trail.
 - A mandatory final preflight that reads the dialog again before an individual send.
@@ -27,7 +27,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now tg-follow-up
 ```
 
-Set `DIALOGHUB_DB_PATH=/opt/dialoghub/data/dialoghub.sqlite3` and `ACCOUNT_SESSIONS_DIR=/root/FULL_CRM/accounts` for the current server layout.
+Set `DIALOGHUB_DB_PATH=/opt/dialoghub/data/dialoghub.sqlite3`, `ACCOUNT_SESSIONS_DIR=/root/FULL_CRM/accounts`, and `ACCOUNT_TITLE_PREFIX=Даниил` for the current server layout. The import rejects all other account labels.
 
 ## Verification
 
