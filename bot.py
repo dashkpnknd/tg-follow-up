@@ -22,7 +22,7 @@ ADMINS = {int(item) for item in os.getenv("ADMIN_IDS", "").split(",") if item.st
 ADMIN_CHAT_ID = int(os.environ["ADMIN_CHAT_ID"]) if os.getenv("ADMIN_CHAT_ID") else None
 ACCESS_MODE = os.getenv("ACCESS_MODE", "group_admins").strip().casefold()
 store = Store(os.getenv("DATABASE_PATH", "data/followup.sqlite3"))
-service = FollowupService(store, TelegramSettings(int(os.environ["API_ID"]), os.environ["API_HASH"], int(os.getenv("HISTORY_LIMIT", "100")), float(os.getenv("SCAN_HISTORY_PAUSE_SECONDS", "3"))))
+service = FollowupService(store, TelegramSettings(int(os.environ["API_ID"]), os.environ["API_HASH"], int(os.getenv("HISTORY_LIMIT", "100")), float(os.getenv("SCAN_HISTORY_PAUSE_SECONDS", "10"))))
 dp = Dispatcher()
 
 
