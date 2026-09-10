@@ -22,7 +22,7 @@ ADMINS = {int(item) for item in os.getenv("ADMIN_IDS", "").split(",") if item.st
 ADMIN_CHAT_ID = int(os.environ["ADMIN_CHAT_ID"]) if os.getenv("ADMIN_CHAT_ID") else None
 ACCESS_MODE = os.getenv("ACCESS_MODE", "group_admins").strip().casefold()
 store = Store(os.getenv("DATABASE_PATH", "data/followup.sqlite3"))
-service = FollowupService(store, TelegramSettings(int(os.environ["API_ID"]), os.environ["API_HASH"], int(os.getenv("HISTORY_LIMIT", "10000"))))
+service = FollowupService(store, TelegramSettings(int(os.environ["API_ID"]), os.environ["API_HASH"], int(os.getenv("HISTORY_LIMIT", "100")), float(os.getenv("SCAN_HISTORY_PAUSE_SECONDS", "3"))))
 dp = Dispatcher()
 
 
@@ -122,7 +122,7 @@ async def scan(query: CallbackQuery):
     await query.message.answer("🔎 Анализирую все диалоги. Отправка остаётся выключенной.")
 
     async def run():
-        totals = await service.scan_all()
+        totals = await service.scan_all(os.getenv("DIALOGHUB_DB_PATH"))
         text = "\n".join(f"{status}: {count}" for status, count in sorted(totals.items())) or "Нет доступных диалогов"
         await query.message.answer(f"✅ Анализ завершён:\n{text}")
     asyncio.create_task(run())
@@ -433,7 +433,7 @@ async def scan_loop():
     while True:
         try:
             if store.setting("auto_scan_enabled") == "1":
-                await service.scan_all()
+                await service.scan_all(os.getenv("DIALOGHUB_DB_PATH"))
         except Exception:
             log.exception("Automatic dialog scan failed")
         await asyncio.sleep(int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))

@@ -21,6 +21,7 @@ class TelegramSettings:
     api_id: int
     api_hash: str
     history_limit: int
+    scan_history_pause_seconds: float = 3.0
 
 
 class FollowupService:
@@ -66,7 +67,27 @@ class FollowupService:
         # library and an independent session-file copy.
         return Client(str(path.with_suffix("")), self.settings.api_id, self.settings.api_hash, no_updates=True)
 
-    async def scan_account(self, account_id: int) -> dict[str, int]:
+    @staticmethod
+    def dialoghub_replied_peers(hub_db_path: str) -> dict[str, set[int]]:
+        """DialogHub imports only dialogs containing an inbound reply.
+
+        Those peers are already ineligible for this scenario, so using the hub
+        as an exclusion index avoids a Telegram history request for each one.
+        """
+        index: dict[str, set[int]] = {}
+        source = sqlite3.connect(f"file:{hub_db_path}?mode=ro", uri=True)
+        source.row_factory = sqlite3.Row
+        try:
+            rows = source.execute("""SELECT a.session_name,d.peer_id
+                FROM dialogs d JOIN accounts a ON a.id=d.account_id
+                WHERE a.enabled=1""").fetchall()
+        finally:
+            source.close()
+        for row in rows:
+            index.setdefault(row["session_name"], set()).add(int(row["peer_id"]))
+        return index
+
+    async def scan_account(self, account_id: int, replied_peers: set[int] | None = None) -> dict[str, int]:
         account = self.store.account(account_id)
         if not account or not account["enabled"]:
             return {"skipped": 1}
@@ -76,14 +97,22 @@ class FollowupService:
             if not await client.connect():
                 self.store.audit("auth_error", "Сессия не авторизована", account_id)
                 return {"auth_error": 1}
+            known_replied = replied_peers or set()
             async for dialog in client.get_dialogs():
                 chat = dialog.chat
                 if chat.type != ChatType.PRIVATE or getattr(chat, "is_bot", False):
                     continue
-                history = []
-                async for item in client.get_chat_history(chat.id, limit=self.settings.history_limit):
-                    history.append(Message(item.id, item.date, bool(item.outgoing), item.text or item.caption or ""))
-                decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(chat.id))
+                if chat.id in known_replied:
+                    decision = Decision(DialogStatus.REPLIED, "DialogHub уже зафиксировал входящий ответ клиента")
+                elif dialog.top_message and not dialog.top_message.outgoing:
+                    decision = Decision(DialogStatus.REPLIED, "Последнее сообщение в чате — входящий ответ клиента")
+                else:
+                    history = []
+                    async for item in client.get_chat_history(chat.id, limit=self.settings.history_limit):
+                        history.append(Message(item.id, item.date, bool(item.outgoing), item.text or item.caption or ""))
+                    decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(chat.id))
+                    # Conservative scan pacing prevents history-import FloodWait.
+                    await asyncio.sleep(self.settings.scan_history_pause_seconds)
                 name = " ".join(x for x in (chat.first_name, chat.last_name) if x)
                 self.store.record_decision(account_id, chat.id, chat.username, name, decision)
                 if decision.blacklisting_phrase:
@@ -98,10 +127,11 @@ class FollowupService:
                 await client.disconnect()
         return results
 
-    async def scan_all(self) -> dict[str, int]:
+    async def scan_all(self, hub_db_path: str | None = None) -> dict[str, int]:
         totals: dict[str, int] = {}
+        replied_index = self.dialoghub_replied_peers(hub_db_path) if hub_db_path else {}
         for account in self.store.accounts():
-            result = await self.scan_account(account["id"])
+            result = await self.scan_account(account["id"], replied_index.get(account["session_name"], set()))
             for key, value in result.items():
                 totals[key] = totals.get(key, 0) + value
         return totals
