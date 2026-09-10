@@ -57,6 +57,11 @@ class Store:
             self.set_default(db, "global_paused", "1")
             self.set_default(db, "delivery_enabled", "0")
             self.set_default(db, "followup_template", DEFAULT_FOLLOWUP)
+            self.set_default(db, "task_max_per_account_per_day", "20")
+            self.set_default(db, "task_delay_seconds", "120")
+            self.set_default(db, "task_work_start_hour", "10")
+            self.set_default(db, "task_work_end_hour", "20")
+            self.set_default(db, "timezone", "Europe/Moscow")
             for phrase in DEFAULT_STOP_WORDS:
                 db.execute("INSERT OR IGNORE INTO stop_words(phrase,created_at) VALUES(?,?)", (phrase, utcnow()))
 
@@ -105,6 +110,22 @@ class Store:
         with self.connect() as db:
             return [row["phrase"] for row in db.execute("SELECT phrase FROM stop_words WHERE enabled=1 ORDER BY phrase")]
 
+    def stop_words(self):
+        with self.connect() as db:
+            return db.execute("SELECT phrase,enabled FROM stop_words ORDER BY phrase").fetchall()
+
+    def add_stop_word(self, phrase: str) -> None:
+        phrase = " ".join(phrase.split())[:200]
+        if not phrase:
+            raise ValueError("Пустая фраза")
+        with self.connect() as db:
+            db.execute("INSERT INTO stop_words(phrase,enabled,created_at) VALUES(?,?,?) ON CONFLICT(phrase) DO UPDATE SET enabled=1", (phrase, 1, utcnow()))
+
+    def remove_stop_word(self, phrase: str) -> bool:
+        with self.connect() as db:
+            result = db.execute("DELETE FROM stop_words WHERE phrase=? COLLATE NOCASE", (phrase,))
+            return result.rowcount == 1
+
     def add_blacklist(self, peer_id: int, reason: str, created_by: int | None = None) -> None:
         with self.connect() as db:
             db.execute("INSERT INTO blacklist(telegram_id,reason,created_at,created_by) VALUES(?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET reason=excluded.reason", (peer_id, reason, utcnow(), created_by))
@@ -135,6 +156,23 @@ class Store:
             rows = db.execute("SELECT status,COUNT(*) count FROM dialog_state GROUP BY status ORDER BY status").fetchall()
         return {row["status"]: row["count"] for row in rows}
 
+    def queue_summary(self):
+        with self.connect() as db:
+            rows = db.execute("SELECT status,COUNT(*) count FROM queue GROUP BY status ORDER BY status").fetchall()
+        return {row["status"]: row["count"] for row in rows}
+
+    def exception_summary(self):
+        with self.connect() as db:
+            blacklisted = db.execute("SELECT COUNT(*) count FROM blacklist").fetchone()["count"]
+            rows = db.execute("SELECT status,COUNT(*) count FROM dialog_state WHERE status IN ('application','refusal','blacklisted') GROUP BY status").fetchall()
+        result = {row["status"]: row["count"] for row in rows}
+        result["blacklist_total"] = blacklisted
+        return result
+
+    def recent_logs(self, limit: int = 15):
+        with self.connect() as db:
+            return db.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
     def pending(self, limit: int = 50):
         with self.connect() as db:
             return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,t.name task_name,t.template,
@@ -157,9 +195,13 @@ class Store:
 
     def create_task(self, name: str, template: str | None = None) -> int:
         effective_template = template or self.setting("followup_template") or DEFAULT_FOLLOWUP
+        max_per_day = int(self.setting("task_max_per_account_per_day", "20") or "20")
+        delay = int(self.setting("task_delay_seconds", "120") or "120")
+        work_start = int(self.setting("task_work_start_hour", "10") or "10")
+        work_end = int(self.setting("task_work_end_hour", "20") or "20")
         with self.connect() as db:
-            cursor = db.execute("""INSERT INTO tasks(name,template,created_at,updated_at) VALUES(?,?,?,?)""",
-                                (name.strip()[:100], effective_template, utcnow(), utcnow()))
+            cursor = db.execute("""INSERT INTO tasks(name,template,max_per_account_per_day,delay_seconds,work_start_hour,work_end_hour,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?)""", (name.strip()[:100], effective_template, max_per_day, delay, work_start, work_end, utcnow(), utcnow()))
             task_id = cursor.lastrowid
             # A task is an explicit snapshot of current candidates. New scans never add people to it automatically.
             db.execute("UPDATE queue SET task_id=?,updated_at=? WHERE status='pending' AND task_id IS NULL", (task_id, utcnow()))

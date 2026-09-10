@@ -9,7 +9,7 @@ Safe Telegram follow-up bot for existing DialogHub accounts. It imports account 
 - Durable SQLite queue, per-dialog state, blacklist and audit trail.
 - A mandatory final preflight that reads the dialog again before an individual send.
 - FloodWait and Telegram errors are recorded without retries intended to evade Telegram restrictions.
-- Telegram control bot: import, scan, preview, status, task drafts and global emergency stop.
+- Telegram control panel: accounts, dialog/candidate preview, queue and task drafts, exclusions/blacklist, editable stop-words and template, statistics, logs, delivery limits, and global emergency stop.
 
 Sending remains disabled (`delivery_enabled=0`) and paused (`global_paused=1`) after installation. A task snapshots the candidates found at creation time; it never absorbs new candidates automatically. The worker only evaluates enabled tasks and still performs the final preflight immediately before each send. Use `/new_task`, `/tasks` and `/enable_task` only after an operator has explicitly lifted both global protections for a reviewed test sample.
 
@@ -28,6 +28,10 @@ sudo systemctl enable --now tg-follow-up
 ```
 
 Set `DIALOGHUB_DB_PATH=/opt/dialoghub/data/dialoghub.sqlite3`, `ACCOUNT_SESSIONS_DIR=/root/FULL_CRM/accounts`, and `ACCOUNT_TITLE_PREFIX=Даниил` for the current server layout. The import rejects all other account labels.
+
+## Access
+
+Create or choose an administration group, add this bot to it as an administrator, then set its numeric group ID as `ADMIN_CHAT_ID` in `/etc/tg-follow-up.env`. Every current administrator of that group will automatically have access from a private chat with the bot; no individual user-ID list is required.
 
 ## Verification
 
