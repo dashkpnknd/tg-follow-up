@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("followup")
 ADMINS = {int(item) for item in os.getenv("ADMIN_IDS", "").split(",") if item.strip()}
 ADMIN_CHAT_ID = int(os.environ["ADMIN_CHAT_ID"]) if os.getenv("ADMIN_CHAT_ID") else None
+ACCESS_MODE = os.getenv("ACCESS_MODE", "group_admins").strip().casefold()
 store = Store(os.getenv("DATABASE_PATH", "data/followup.sqlite3"))
 service = FollowupService(store, TelegramSettings(int(os.environ["API_ID"]), os.environ["API_HASH"], int(os.getenv("HISTORY_LIMIT", "10000"))))
 dp = Dispatcher()
@@ -52,6 +53,8 @@ def main_menu() -> InlineKeyboardMarkup:
 
 
 async def is_allowed(event: Message | CallbackQuery) -> bool:
+    if ACCESS_MODE == "public":
+        return True
     user = event.from_user
     if not user:
         return False
@@ -82,7 +85,7 @@ async def send_menu(message: Message, text: str = "Панель управлен
 
 @dp.message(CommandStart())
 async def start(message: Message):
-    if not ADMIN_CHAT_ID and not ADMINS:
+    if ACCESS_MODE != "public" and not ADMIN_CHAT_ID and not ADMINS:
         await message.answer("Бот запущен, но доступ к управлению ещё не настроен. Добавьте бота администратором в управляющую группу и передайте её числовой ID — тогда доступ автоматически получат все администраторы группы.")
         return
     if await reject_if_needed(message): return
@@ -402,6 +405,8 @@ async def delivery_loop():
 
 
 async def main():
+    if ACCESS_MODE not in {"public", "group_admins"}:
+        raise RuntimeError("ACCESS_MODE must be public or group_admins")
     bot = Bot(os.environ["BOT_TOKEN"])
     asyncio.create_task(delivery_loop())
     await dp.start_polling(bot)

@@ -31,7 +31,7 @@ Set `DIALOGHUB_DB_PATH=/opt/dialoghub/data/dialoghub.sqlite3`, `ACCOUNT_SESSIONS
 
 ## Access
 
-Create or choose an administration group, add this bot to it as an administrator, then set its numeric group ID as `ADMIN_CHAT_ID` in `/etc/tg-follow-up.env`. Every current administrator of that group will automatically have access from a private chat with the bot; no individual user-ID list is required.
+The default `ACCESS_MODE=group_admins` uses an administration group: add the bot to that group as an administrator and set its numeric group ID as `ADMIN_CHAT_ID` in `/etc/tg-follow-up.env`. Every current administrator of that group will automatically have access from a private chat with the bot. To grant management access to every person with the bot link, set `ACCESS_MODE=public` instead; this intentionally makes all control-panel actions public.
 
 ## Verification
 
