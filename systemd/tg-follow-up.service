@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram follow-up safety bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tg-follow-up
+EnvironmentFile=/etc/tg-follow-up.env
+ExecStart=/opt/tg-follow-up/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
