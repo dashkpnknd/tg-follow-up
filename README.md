@@ -27,7 +27,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now tg-follow-up
 ```
 
-Set `DIALOGHUB_DB_PATH=/root/github-sync/tg-dialog-hub/data/dialoghub.sqlite3` and `ACCOUNT_SESSIONS_DIR=/root/FULL_CRM/accounts` for the current server layout.
+Set `DIALOGHUB_DB_PATH=/opt/dialoghub/data/dialoghub.sqlite3` and `ACCOUNT_SESSIONS_DIR=/root/FULL_CRM/accounts` for the current server layout.
 
 ## Verification
 
