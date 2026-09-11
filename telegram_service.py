@@ -198,6 +198,11 @@ class FollowupService:
             return f"flood_wait:{exc.seconds}"
         except RPCError as exc:
             return f"error:{exc.__class__.__name__}"
+        except Exception as exc:
+            # Treat an unknown Telegram/API failure just like a restriction:
+            # the delivery loop will retire this sender instead of retrying it.
+            self.store.audit("send_preflight_error", exc.__class__.__name__, queue_row["account_id"], queue_row["peer_id"])
+            return f"error:{exc.__class__.__name__}"
         finally:
             if client.is_connected():
                 await client.disconnect()

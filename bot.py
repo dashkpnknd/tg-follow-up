@@ -168,7 +168,7 @@ async def disable_reports(message: Message):
 async def accounts(query: CallbackQuery):
     if await reject_if_needed(query): return
     rows = store.accounts()
-    labels = [f"• {row['title'] or row['session_name']} — {row['auth_status']}, {'включён' if row['enabled'] else 'выключен'}" for row in rows]
+    labels = [f"• {row['title'] or row['session_name']} — {'доступен для отправки' if row['send_status'] != 'unavailable' else 'исключён после ошибки'}, {'включён' if row['enabled'] else 'выключен'}" for row in rows]
     text = f"👥 Аккаунты Даниила: {len(rows)}\n" + ("\n".join(labels[:30]) if labels else "Ещё не импортированы.")
     await query.message.answer(text, reply_markup=kb(("🔄 Обновить из DialogHub", "import"), ("🔎 Анализировать все", "scan"), ("◀️ Меню", "menu")))
     await query.answer()
