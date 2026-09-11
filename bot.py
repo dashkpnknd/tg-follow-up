@@ -24,6 +24,7 @@ ACCESS_MODE = os.getenv("ACCESS_MODE", "group_admins").strip().casefold()
 store = Store(os.getenv("DATABASE_PATH", "data/followup.sqlite3"))
 service = FollowupService(store, TelegramSettings(int(os.environ["API_ID"]), os.environ["API_HASH"], int(os.getenv("HISTORY_LIMIT", "100")), float(os.getenv("SCAN_HISTORY_PAUSE_SECONDS", "10"))))
 dp = Dispatcher()
+report_bot: Bot | None = None
 
 
 class Flow(StatesGroup):
@@ -48,7 +49,8 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎯 Кандидаты", callback_data="candidates"), InlineKeyboardButton(text="📬 Очередь и задачи", callback_data="queue")],
         [InlineKeyboardButton(text="⛔ Исключения", callback_data="exceptions"), InlineKeyboardButton(text="🛑 Стоп-слова", callback_data="stop_words")],
         [InlineKeyboardButton(text="✉️ Шаблон", callback_data="template"), InlineKeyboardButton(text="📊 Статистика", callback_data="statistics")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"), InlineKeyboardButton(text="🧾 Логи", callback_data="logs")],
+        [InlineKeyboardButton(text="📣 Отчёты", callback_data="reports"), InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
+        [InlineKeyboardButton(text="🧾 Логи", callback_data="logs")],
         [InlineKeyboardButton(text="🚨 ОСТАНОВИТЬ ВСЁ", callback_data="emergency_stop")],
     ])
 
@@ -84,6 +86,50 @@ async def send_menu(message: Message, text: str = "Панель управлен
     await message.answer(text, reply_markup=main_menu())
 
 
+async def send_report(text: str) -> None:
+    """Post operational reports only to the explicitly configured group."""
+    chat_id = store.setting("report_chat_id")
+    if not chat_id or report_bot is None:
+        return
+    try:
+        await report_bot.send_message(int(chat_id), text)
+    except Exception:
+        log.exception("Could not deliver report to chat %s", chat_id)
+
+
+def scan_report(totals: dict[str, int]) -> str:
+    statuses = store.candidate_summary()
+    queue_data = store.queue_summary()
+    lines = [
+        "🔎 Отчёт анализа диалогов",
+        f"За цикл обработано: {sum(totals.values())}",
+        f"Новых/подходящих кандидатов: {totals.get('candidate', 0)}",
+        f"Всего кандидатов в очереди: {queue_data.get('pending', 0)}",
+        f"Диалогов с ответом: {statuses.get('replied', 0)}",
+        f"Заявок исключено: {statuses.get('application', 0)}",
+        f"Ожидают 48 часов: {statuses.get('too_fresh', 0)}",
+    ]
+    if totals.get("history_error") or totals.get("error"):
+        lines.append(f"Ошибок чтения: {totals.get('history_error', 0) + totals.get('error', 0)}")
+    return "\n".join(lines)
+
+
+async def send_delivery_report() -> None:
+    event = next((row for row in store.recent_logs(5) if row["kind"] == "followup_sent"), None)
+    if not event:
+        return
+    account = store.account(event["account_id"])
+    account_title = account["title"] if account else "неизвестный аккаунт"
+    per_account = store.sent_today(event["account_id"])
+    total_sent = store.queue_summary().get("sent", 0)
+    await send_report(
+        "✉️ Дожим отправлен\n"
+        "Текст: «Фиксирую отказ?»\n"
+        f"Аккаунт: {account_title}\n"
+        f"№ {per_account} с этого аккаунта сегодня · всего отправлено: {total_sent}"
+    )
+
+
 @dp.message(CommandStart())
 async def start(message: Message):
     if ACCESS_MODE != "public" and not ADMIN_CHAT_ID and not ADMINS:
@@ -91,6 +137,31 @@ async def start(message: Message):
         return
     if await reject_if_needed(message): return
     await send_menu(message, "Бот готов. Отправка выключена и поставлена на глобальную паузу.")
+
+
+@dp.message(F.text.startswith("/reports_here"))
+@dp.channel_post(F.text.startswith("/reports_here"))
+async def set_reports_here(message: Message):
+    if await reject_if_needed(message): return
+    if str(message.chat.type) not in {"group", "supergroup", "channel"}:
+        await message.answer("Добавьте меня в отдельную группу или канал для отчётов и отправьте там команду /reports_here.")
+        return
+    store.set_setting("report_chat_id", str(message.chat.id))
+    store.audit("report_chat_configured", f"Чат отчётов настроен: {message.chat.id}")
+    await message.answer("✅ Эта группа назначена для отчётов по анализу и каждой отправке.")
+    await send_report(scan_report({}))
+
+
+@dp.message(F.text.startswith("/reports_off"))
+@dp.channel_post(F.text.startswith("/reports_off"))
+async def disable_reports(message: Message):
+    if await reject_if_needed(message): return
+    if store.setting("report_chat_id") == str(message.chat.id):
+        store.set_setting("report_chat_id", "")
+        store.audit("report_chat_disabled", "Отчёты отключены")
+        await message.answer("Отчёты в эту группу отключены.")
+    else:
+        await message.answer("Эта группа не назначена для отчётов.")
 
 
 @dp.callback_query(F.data == "accounts")
@@ -125,6 +196,7 @@ async def scan(query: CallbackQuery):
         totals = await service.scan_all(os.getenv("DIALOGHUB_DB_PATH"))
         text = "\n".join(f"{status}: {count}" for status, count in sorted(totals.items())) or "Нет доступных диалогов"
         await query.message.answer(f"✅ Анализ завершён:\n{text}")
+        await send_report(scan_report(totals))
     asyncio.create_task(run())
 
 
@@ -308,6 +380,21 @@ async def statistics(query: CallbackQuery):
     await query.answer()
 
 
+@dp.callback_query(F.data == "reports")
+async def reports(query: CallbackQuery):
+    if await reject_if_needed(query): return
+    configured = bool(store.setting("report_chat_id"))
+    text = (
+        "📣 Отчёты\n"
+        f"Отчётная группа: {'настроена' if configured else 'не настроена'}\n\n"
+        "Создайте отдельную группу или канал, добавьте туда бота и отправьте в нём команду /reports_here. "
+        "Туда будут поступать: итог каждого цикла анализа и отчёт о каждой отправке. "
+        "Команда /reports_off в той же группе отключит отчёты."
+    )
+    await query.message.answer(text)
+    await query.answer()
+
+
 @dp.callback_query(F.data == "logs")
 async def logs(query: CallbackQuery):
     if await reject_if_needed(query): return
@@ -421,7 +508,9 @@ async def menu(query: CallbackQuery):
 async def delivery_loop():
     while True:
         try:
-            await service.run_delivery_tick()
+            sent = await service.run_delivery_tick()
+            if sent:
+                await send_delivery_report()
         except Exception:
             log.exception("Delivery tick failed")
         await asyncio.sleep(30)
@@ -433,7 +522,8 @@ async def scan_loop():
     while True:
         try:
             if store.setting("auto_scan_enabled") == "1":
-                await service.scan_all(os.getenv("DIALOGHUB_DB_PATH"))
+                totals = await service.scan_all(os.getenv("DIALOGHUB_DB_PATH"))
+                await send_report(scan_report(totals))
         except Exception:
             log.exception("Automatic dialog scan failed")
         await asyncio.sleep(int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))
@@ -442,7 +532,9 @@ async def scan_loop():
 async def main():
     if ACCESS_MODE not in {"public", "group_admins"}:
         raise RuntimeError("ACCESS_MODE must be public or group_admins")
+    global report_bot
     bot = Bot(os.environ["BOT_TOKEN"])
+    report_bot = bot
     asyncio.create_task(delivery_loop())
     asyncio.create_task(scan_loop())
     await dp.start_polling(bot)
