@@ -231,8 +231,11 @@ class FollowupService:
                 self.store.mark_queue(row["id"], "pending")
             else:
                 self.store.mark_queue(row["id"], "error", result)
-                if result.startswith("flood_wait"):
-                    self.store.set_task_enabled(row["task_id"], False)
-                    self.store.audit("task_paused_floodwait", f"Задача {row['task_id']} остановлена: {result}", row["account_id"])
+                # Restricted, unauthorised and rate-limited accounts are
+                # skipped permanently until an operator explicitly restores
+                # them.  One bad account must never pause the other accounts
+                # or provoke repeated send attempts.
+                cancelled = self.store.disable_sending_for_account(row["account_id"], result)
+                self.store.audit("account_send_disabled", f"Аккаунт исключён из отправки: {result}; отменено в очереди: {cancelled}", row["account_id"])
             return int(result == "sent")
         return 0

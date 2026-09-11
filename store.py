@@ -232,12 +232,12 @@ class Store:
             return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,t.name task_name,t.template,
                  t.max_per_account_per_day,t.delay_seconds,t.max_delay_seconds,t.work_start_hour,t.work_end_hour
                  FROM queue q JOIN accounts a ON a.id=q.account_id JOIN tasks t ON t.id=q.task_id
-                 WHERE q.status='pending' AND a.enabled=1 AND t.enabled=1
+                 WHERE q.status='pending' AND a.enabled=1 AND a.send_status!='unavailable' AND t.enabled=1
                  AND q.id IN (
                    SELECT MIN(q2.id) FROM queue q2
                    JOIN accounts a2 ON a2.id=q2.account_id
                    JOIN tasks t2 ON t2.id=q2.task_id
-                   WHERE q2.status='pending' AND a2.enabled=1 AND t2.enabled=1
+                   WHERE q2.status='pending' AND a2.enabled=1 AND a2.send_status!='unavailable' AND t2.enabled=1
                    GROUP BY q2.account_id
                  )
                  ORDER BY q.planned_at,q.id LIMIT ?""", (limit,)).fetchall()
@@ -250,6 +250,23 @@ class Store:
         with self.connect() as db:
             db.execute("UPDATE queue SET status='sent',updated_at=? WHERE id=?", (utcnow(), queue_id))
             db.execute("UPDATE dialog_state SET status='followup_sent',reason='Дожим успешно отправлен',followup_sent_at=?,checked_at=? WHERE account_id=? AND peer_id=?", (utcnow(), utcnow(), account_id, peer_id))
+
+    def disable_sending_for_account(self, account_id: int, reason: str) -> int:
+        """Stop delivery from one unavailable account without stopping the task.
+
+        A restricted or banned Telegram account is not retried automatically:
+        retrying it adds risk but cannot help the remaining healthy accounts.
+        """
+        with self.connect() as db:
+            db.execute(
+                "UPDATE accounts SET send_status='unavailable',last_error=? WHERE id=?",
+                (reason[:500], account_id),
+            )
+            result = db.execute(
+                "UPDATE queue SET status='cancelled',reason=?,updated_at=? WHERE account_id=? AND status IN ('pending','error','sending')",
+                (f"Аккаунт недоступен для отправки: {reason[:300]}", utcnow(), account_id),
+            )
+            return result.rowcount
 
     def sent_today(self, account_id: int, task_id: int | None = None) -> int:
         with self.connect() as db:

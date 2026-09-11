@@ -65,6 +65,20 @@ class StoreTests(unittest.TestCase):
             store.set_task_enabled(task_id, True)
             self.assertEqual({row["account_id"] for row in store.pending()}, {first["id"], second["id"]})
 
+    def test_unavailable_account_is_removed_from_delivery_queue(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("session", "Account", "/tmp/session.session")
+            account = store.accounts()[0]
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            store.record_decision(account["id"], 42, None, None, decision, 42)
+            task_id, _ = store.create_task("Continuous", 0)
+            store.set_task_enabled(task_id, True)
+            self.assertEqual(len(store.pending()), 1)
+            self.assertEqual(store.disable_sending_for_account(account["id"], "auth_error"), 1)
+            self.assertEqual(store.pending(), [])
+            self.assertEqual(store.account(account["id"])["send_status"], "unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()
