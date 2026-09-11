@@ -107,6 +107,14 @@ class StoreTests(unittest.TestCase):
                 value = db.execute("SELECT peer_access_hash FROM dialog_state WHERE account_id=? AND peer_id=?", (account["id"], 99)).fetchone()["peer_access_hash"]
             self.assertEqual(value, 12345)
 
+    def test_auth_status_is_recorded(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("session", "Account", "/tmp/session.session")
+            account = store.accounts()[0]
+            store.set_account_auth_status(account["id"], "authorized")
+            self.assertEqual(store.account(account["id"])["auth_status"], "authorized")
+
 
 if __name__ == "__main__":
     unittest.main()

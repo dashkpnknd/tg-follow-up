@@ -124,6 +124,13 @@ class Store:
         with self.connect() as db:
             return db.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
 
+    def set_account_auth_status(self, account_id: int, status: str, error: str | None = None) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE accounts SET auth_status=?,last_error=COALESCE(?,last_error) WHERE id=?",
+                (status, error[:500] if error else None, account_id),
+            )
+
     def active_stop_words(self) -> list[str]:
         with self.connect() as db:
             return [row["phrase"] for row in db.execute("SELECT phrase FROM stop_words WHERE enabled=1 ORDER BY phrase")]

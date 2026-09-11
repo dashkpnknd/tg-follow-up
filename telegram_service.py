@@ -102,15 +102,51 @@ class FollowupService:
             index.setdefault(row["session_name"], set()).add(int(row["peer_id"]))
         return index
 
-    async def scan_account(self, account_id: int, replied_peers: set[int] | None = None) -> dict[str, int]:
+    async def check_account(self, account_id: int) -> str:
+        """Check only session availability; this never reads dialog history."""
+        account = self.store.account(account_id)
+        if not account or not account["enabled"]:
+            return "disabled"
+        if account["send_status"] == "unavailable":
+            return "unavailable"
+        client = self._client(account["session_path"])
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                self.store.set_account_auth_status(account_id, "unauthorized", "Сессия не авторизована")
+                self.store.disable_sending_for_account(account_id, "auth_error")
+                self.store.audit("auth_error", "Сессия не авторизована", account_id)
+                return "unauthorized"
+            self.store.set_account_auth_status(account_id, "authorized")
+            self.store.audit("account_checked", "Сессия авторизована; история не читалась", account_id)
+            return "authorized"
+        except (TimeoutError, OSError, RPCError) as exc:
+            # An unavailable check is not treated as a ban. It is skipped for
+            # this cycle, without opening any dialog history.
+            self.store.set_account_auth_status(account_id, "check_error", exc.__class__.__name__)
+            self.store.audit("account_check_error", exc.__class__.__name__, account_id)
+            return "check_error"
+        finally:
+            if client.is_connected():
+                await client.disconnect()
+
+    async def scan_account(self, account_id: int, replied_peers: set[int] | None = None, prechecked: bool = False) -> dict[str, int]:
         account = self.store.account(account_id)
         if not account or not account["enabled"]:
             return {"skipped": 1}
+        if account["send_status"] == "unavailable":
+            return {"unavailable": 1}
+        if not prechecked:
+            check = await self.check_account(account_id)
+            if check != "authorized":
+                return {check: 1}
         client = self._client(account["session_path"])
         results: dict[str, int] = {}
         try:
             await client.connect()
             if not await client.is_user_authorized():
+                self.store.set_account_auth_status(account_id, "unauthorized", "Сессия не авторизована")
+                self.store.disable_sending_for_account(account_id, "auth_error")
                 self.store.audit("auth_error", "Сессия не авторизована", account_id)
                 return {"auth_error": 1}
             known_replied = replied_peers or set()
@@ -174,7 +210,11 @@ class FollowupService:
         totals: dict[str, int] = {}
         replied_index = self.dialoghub_replied_peers(hub_db_path) if hub_db_path else {}
         for account in self.store.accounts():
-            result = await self.scan_account(account["id"], replied_index.get(account["session_name"], set()))
+            check = await self.check_account(account["id"])
+            if check != "authorized":
+                result = {check: 1}
+            else:
+                result = await self.scan_account(account["id"], replied_index.get(account["session_name"], set()), prechecked=True)
             for key, value in result.items():
                 totals[key] = totals.get(key, 0) + value
         return totals
