@@ -144,7 +144,7 @@ async def queue(query: CallbackQuery):
     if await reject_if_needed(query): return
     summary, tasks = store.queue_summary(), store.tasks()
     lines = [f"{status}: {count}" for status, count in sorted(summary.items())] or ["Очередь пуста"]
-    lines += ["", *[f"#{row['id']} {row['name']} — {'включена' if row['enabled'] else 'черновик'}, в очереди: {row['queued'] or 0}, отправлено: {row['sent'] or 0}" for row in tasks[:15]]]
+    lines += ["", *[f"#{row['id']} {row['name']} — {'включена' if row['enabled'] else 'черновик'}, в очереди: {row['queued'] or 0}, отправлено: {row['sent'] or 0}; автодобавление после 48 ч: {'да' if row['auto_include_new'] else 'нет'}" for row in tasks[:15]]]
     buttons = [("➕ Новая задача", "task_new"), *((f"▶️ Запустить #{row['id']}", f"task_enable:{row['id']}") for row in tasks if not row["enabled"]), ("◀️ Меню", "menu")]
     await query.message.answer("📬 Очередь и задачи:\n" + "\n".join(lines), reply_markup=kb(*buttons))
     await query.answer()
@@ -186,7 +186,7 @@ async def task_sample(message: Message, state: FSMContext):
     scope = "полной базы" if sample_limit == 0 else f"теста: до {sample_limit} всего"
     store.audit("task_created", f"Создана задача #{task_id}: {data['task_name']}; {scope}; выбрано {selected}")
     await state.clear()
-    await message.answer(f"✅ Задача #{task_id} создана как черновик. Выбрано кандидатов: {selected} ({scope}). Проверьте её в разделе «Очередь и задачи».", reply_markup=main_menu())
+    await message.answer(f"✅ Задача #{task_id} создана как черновик. Выбрано кандидатов: {selected} ({scope}). После включения новые подходящие диалоги будут автоматически добавляться в неё, когда пройдёт 48 часов. Проверьте её в разделе «Очередь и задачи».", reply_markup=main_menu())
 
 
 @dp.callback_query(F.data.startswith("task_enable:"))
@@ -197,7 +197,7 @@ async def task_enable(query: CallbackQuery):
         await query.message.answer("Задача не включена: сначала в «Настройках» нужно отдельно подтвердить доступ к отправке и снять глобальную паузу.")
     elif store.set_task_enabled(task_id, True):
         store.audit("task_enabled", f"Задача #{task_id} включена")
-        await query.message.answer(f"▶️ Задача #{task_id} включена. Перед каждым сообщением диалог будет проверен повторно.")
+        await query.message.answer(f"▶️ Задача #{task_id} включена. Перед каждым сообщением диалог будет проверен повторно; новые молчуны будут добавляться автоматически после 48 часов.")
     else:
         await query.message.answer("Задача не найдена.")
     await query.answer()

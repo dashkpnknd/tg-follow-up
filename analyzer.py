@@ -9,6 +9,7 @@ import re
 from typing import Iterable
 
 DEFAULT_FOLLOWUP = "Фиксирую отказ?"
+MIN_FOLLOWUP_AGE = timedelta(hours=48)
 APPLICATION_MARKERS = ("@gelikky", "@localtraffic")
 DEFAULT_STOP_WORDS = (
     "неинтересно", "не интересно", "не актуально", "неактуально", "не нужно",
@@ -68,7 +69,7 @@ def classify(
     is_blacklisted: bool = False,
     followup_text: str = DEFAULT_FOLLOWUP,
     now: datetime | None = None,
-    min_age: timedelta = timedelta(hours=48),
+    min_age: timedelta = MIN_FOLLOWUP_AGE,
 ) -> Decision:
     """Classify a dialog without inferring intent from silence.
 

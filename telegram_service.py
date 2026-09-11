@@ -122,7 +122,9 @@ class FollowupService:
                 # Re-listing dialogs is cheap compared to history retrieval. Once
                 # a chat has been classified, it is not read again unless a new
                 # message changes the dialog's latest-message ID.
-                if source_message_id and self.store.dialog_source_message_id(account_id, chat.id) == source_message_id:
+                if (source_message_id
+                    and self.store.dialog_source_message_id(account_id, chat.id) == source_message_id
+                    and not self.store.dialog_requires_recheck(account_id, chat.id)):
                     results["unchanged"] = results.get("unchanged", 0) + 1
                     continue
                 if chat.id in known_replied:

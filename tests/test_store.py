@@ -26,6 +26,31 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(store.setting("global_paused"), "1")
             self.assertEqual(store.setting("delivery_enabled"), "0")
 
+    def test_enabled_task_receives_new_candidate_after_48_hour_recheck(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("session", "Account", "/tmp/session.session")
+            account = store.accounts()[0]
+            task_id, _ = store.create_task("Continuous", 0)
+            store.set_task_enabled(task_id, True)
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            store.record_decision(account["id"], 456, "name", "Name", decision, 100)
+            task = store.tasks()[0]
+            self.assertEqual(task["queued"], 1)
+            self.assertEqual(task["auto_include_new"], 1)
+
+    def test_too_fresh_dialog_requires_recheck_at_48_hours(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("session", "Account", "/tmp/session.session")
+            account = store.accounts()[0]
+            fresh = Decision(DialogStatus.TOO_FRESH, "wait", datetime.now(timezone.utc) - timedelta(hours=47))
+            store.record_decision(account["id"], 789, "name", "Name", fresh, 101)
+            self.assertFalse(store.dialog_requires_recheck(account["id"], 789))
+            due = Decision(DialogStatus.TOO_FRESH, "wait", datetime.now(timezone.utc) - timedelta(hours=49))
+            store.record_decision(account["id"], 789, "name", "Name", due, 101)
+            self.assertTrue(store.dialog_requires_recheck(account["id"], 789))
+
 
 if __name__ == "__main__":
     unittest.main()

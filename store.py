@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from analyzer import DEFAULT_FOLLOWUP, DEFAULT_STOP_WORDS, Decision, DialogStatus
+from analyzer import DEFAULT_FOLLOWUP, DEFAULT_STOP_WORDS, MIN_FOLLOWUP_AGE, Decision, DialogStatus
 
 
 def utcnow() -> str:
@@ -46,7 +46,9 @@ class Store:
               id INTEGER PRIMARY KEY, name TEXT NOT NULL, template TEXT NOT NULL,
               enabled INTEGER NOT NULL DEFAULT 0, max_per_account_per_day INTEGER NOT NULL DEFAULT 20,
               delay_seconds INTEGER NOT NULL DEFAULT 600, max_delay_seconds INTEGER NOT NULL DEFAULT 900, work_start_hour INTEGER NOT NULL DEFAULT 10,
-              work_end_hour INTEGER NOT NULL DEFAULT 20, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+              work_end_hour INTEGER NOT NULL DEFAULT 20,
+              auto_include_new INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS audit_log (
               id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, account_id INTEGER, peer_id INTEGER,
               details TEXT NOT NULL);
@@ -60,6 +62,10 @@ class Store:
             task_columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
             if "max_delay_seconds" not in task_columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN max_delay_seconds INTEGER NOT NULL DEFAULT 900")
+            if "auto_include_new" not in task_columns:
+                # Existing tasks retain their current queue until explicitly
+                # enabled; from that point new eligible dialogs join them too.
+                db.execute("ALTER TABLE tasks ADD COLUMN auto_include_new INTEGER NOT NULL DEFAULT 1")
             self.set_default(db, "global_paused", "1")
             self.set_default(db, "delivery_enabled", "0")
             self.set_default(db, "followup_template", DEFAULT_FOLLOWUP)
@@ -147,6 +153,29 @@ class Store:
             row = db.execute("SELECT source_message_id FROM dialog_state WHERE account_id=? AND peer_id=?", (account_id, peer_id)).fetchone()
         return int(row["source_message_id"]) if row and row["source_message_id"] else None
 
+    def dialog_requires_recheck(self, account_id: int, peer_id: int) -> bool:
+        """Return true when a quiet dialog can become eligible without a new message.
+
+        A chat whose last outbound message is less than 48 hours old has the
+        same latest-message id when it crosses the 48-hour threshold.  It must
+        therefore not be skipped by the incremental scanner.
+        """
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT status,last_outbound_at FROM dialog_state WHERE account_id=? AND peer_id=?",
+                (account_id, peer_id),
+            ).fetchone()
+        if not row or row["status"] != DialogStatus.TOO_FRESH or not row["last_outbound_at"]:
+            return False
+        return datetime.fromisoformat(row["last_outbound_at"]) + MIN_FOLLOWUP_AGE <= datetime.now(timezone.utc)
+
+    @staticmethod
+    def _active_auto_task_id(db: sqlite3.Connection) -> int | None:
+        row = db.execute(
+            "SELECT id FROM tasks WHERE enabled=1 AND auto_include_new=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return int(row["id"]) if row else None
+
     def record_decision(self, account_id: int, peer_id: int, username: str | None, name: str | None, decision: Decision, source_message_id: int | None = None) -> None:
         with self.connect() as db:
             prior = db.execute("SELECT followup_sent_at FROM dialog_state WHERE account_id=? AND peer_id=?", (account_id, peer_id)).fetchone()
@@ -158,9 +187,18 @@ class Store:
                 (account_id, peer_id, username, name, decision.status, decision.reason,
                  decision.relevant_outbound_at.isoformat() if decision.relevant_outbound_at else None, utcnow(), sent_at, source_message_id))
             if decision.status == DialogStatus.CANDIDATE and not sent_at:
+                active_task_id = self._active_auto_task_id(db)
                 db.execute("""INSERT INTO queue(account_id,peer_id,status,planned_at,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
                   ON CONFLICT(account_id,peer_id) DO UPDATE SET status=CASE WHEN queue.status IN ('sent','sending') THEN queue.status ELSE 'pending' END,
                   reason=excluded.reason,updated_at=excluded.updated_at""", (account_id, peer_id, "pending", utcnow(), decision.reason, utcnow(), utcnow()))
+                # Do not move a candidate that was deliberately put into a
+                # different task.  Only unassigned, newly discovered dialogs
+                # join the currently enabled automatic task.
+                if active_task_id is not None:
+                    db.execute(
+                        "UPDATE queue SET task_id=?,updated_at=? WHERE account_id=? AND peer_id=? AND task_id IS NULL AND status='pending'",
+                        (active_task_id, utcnow(), account_id, peer_id),
+                    )
             elif decision.status != DialogStatus.CANDIDATE:
                 db.execute("UPDATE queue SET status='cancelled',reason=?,updated_at=? WHERE account_id=? AND peer_id=? AND status IN ('pending','error')", (decision.reason, utcnow(), account_id, peer_id))
 
@@ -212,7 +250,7 @@ class Store:
         return datetime.fromisoformat(row["value"]) if row and row["value"] else None
 
     def create_task(self, name: str, sample_limit: int, template: str | None = None) -> tuple[int, int]:
-        """Snapshot a small global test sample (or full task) without later scans."""
+        """Create a task from the current pool; enabled tasks also accept new candidates."""
         effective_template = template or self.setting("followup_template") or DEFAULT_FOLLOWUP
         max_per_day = int(self.setting("task_max_per_account_per_day", "20") or "20")
         delay = int(self.setting("task_delay_seconds", "600") or "600")
@@ -220,8 +258,8 @@ class Store:
         work_start = int(self.setting("task_work_start_hour", "10") or "10")
         work_end = int(self.setting("task_work_end_hour", "20") or "20")
         with self.connect() as db:
-            cursor = db.execute("""INSERT INTO tasks(name,template,max_per_account_per_day,delay_seconds,max_delay_seconds,work_start_hour,work_end_hour,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?)""", (name.strip()[:100], effective_template, max_per_day, delay, max(max_delay, delay), work_start, work_end, utcnow(), utcnow()))
+            cursor = db.execute("""INSERT INTO tasks(name,template,max_per_account_per_day,delay_seconds,max_delay_seconds,work_start_hour,work_end_hour,auto_include_new,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""", (name.strip()[:100], effective_template, max_per_day, delay, max(max_delay, delay), work_start, work_end, 1, utcnow(), utcnow()))
             task_id = cursor.lastrowid
             if sample_limit == 0:
                 result = db.execute("UPDATE queue SET task_id=?,updated_at=? WHERE status='pending' AND task_id IS NULL", (task_id, utcnow()))
@@ -240,4 +278,11 @@ class Store:
     def set_task_enabled(self, task_id: int, enabled: bool) -> bool:
         with self.connect() as db:
             result = db.execute("UPDATE tasks SET enabled=?,updated_at=? WHERE id=?", (int(enabled), utcnow(), task_id))
+            if enabled and result.rowcount:
+                # Include candidates found before the task was started.  Future
+                # candidates are assigned atomically in record_decision().
+                db.execute(
+                    "UPDATE queue SET task_id=?,updated_at=? WHERE status='pending' AND task_id IS NULL",
+                    (task_id, utcnow()),
+                )
             return result.rowcount == 1
