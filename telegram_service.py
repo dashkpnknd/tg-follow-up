@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient
 from telethon.crypto import AuthKey
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import FloodWaitError, PeerIdInvalidError, RPCError
 from telethon.sessions import MemorySession
 from telethon.tl.types import InputPeerUser, User
 
@@ -158,6 +158,10 @@ class FollowupService:
                     self.store.add_blacklist(chat.id, f"Автоматически: {decision.blacklisting_phrase}")
                 results[decision.status] = results.get(decision.status, 0) + 1
             self.store.audit("scan_finished", f"Просканировано: {sum(results.values())}", account_id)
+        except PeerIdInvalidError as exc:
+            # A stale/deleted peer is about this one chat, not the sender
+            # account. Skip only it and keep the account available.
+            return f"peer_error:{exc.__class__.__name__}"
         except RPCError as exc:
             self.store.audit("scan_error", str(exc), account_id)
             results["error"] = 1
@@ -253,6 +257,9 @@ class FollowupService:
                 self.store.mark_queue(row["id"], "cancelled")
             elif result == "blocked":
                 self.store.mark_queue(row["id"], "pending")
+            elif result.startswith("peer_error:"):
+                self.store.mark_queue(row["id"], "cancelled", result)
+                self.store.audit("peer_send_skipped", f"Диалог исключён: {result}", row["account_id"], row["peer_id"])
             else:
                 self.store.mark_queue(row["id"], "error", result)
                 # Restricted, unauthorised and rate-limited accounts are
