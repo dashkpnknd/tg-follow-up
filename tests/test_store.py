@@ -51,6 +51,20 @@ class StoreTests(unittest.TestCase):
             store.record_decision(account["id"], 789, "name", "Name", due, 101)
             self.assertTrue(store.dialog_requires_recheck(account["id"], 789))
 
+    def test_pending_selects_one_head_per_account(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("one", "One", "/tmp/one.session")
+            store.import_account("two", "Two", "/tmp/two.session")
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            first, second = store.accounts()
+            for peer_id in (1, 2, 3):
+                store.record_decision(first["id"], peer_id, None, None, decision, peer_id)
+            store.record_decision(second["id"], 4, None, None, decision, 4)
+            task_id, _ = store.create_task("Continuous", 0)
+            store.set_task_enabled(task_id, True)
+            self.assertEqual({row["account_id"] for row in store.pending()}, {first["id"], second["id"]})
+
 
 if __name__ == "__main__":
     unittest.main()

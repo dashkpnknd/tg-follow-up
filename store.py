@@ -226,10 +226,21 @@ class Store:
 
     def pending(self, limit: int = 50):
         with self.connect() as db:
+            # Consider the head of each account's queue, rather than the first
+            # N rows globally.  Without this, a large first account could hide
+            # all other accounts behind its 10–15 minute cooldown.
             return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,t.name task_name,t.template,
                  t.max_per_account_per_day,t.delay_seconds,t.max_delay_seconds,t.work_start_hour,t.work_end_hour
                  FROM queue q JOIN accounts a ON a.id=q.account_id JOIN tasks t ON t.id=q.task_id
-                 WHERE q.status='pending' AND a.enabled=1 AND t.enabled=1 ORDER BY q.planned_at LIMIT ?""", (limit,)).fetchall()
+                 WHERE q.status='pending' AND a.enabled=1 AND t.enabled=1
+                 AND q.id IN (
+                   SELECT MIN(q2.id) FROM queue q2
+                   JOIN accounts a2 ON a2.id=q2.account_id
+                   JOIN tasks t2 ON t2.id=q2.task_id
+                   WHERE q2.status='pending' AND a2.enabled=1 AND t2.enabled=1
+                   GROUP BY q2.account_id
+                 )
+                 ORDER BY q.planned_at,q.id LIMIT ?""", (limit,)).fetchall()
 
     def mark_queue(self, queue_id: int, status: str, error: str | None = None) -> None:
         with self.connect() as db:
