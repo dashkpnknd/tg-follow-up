@@ -36,7 +36,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS dialog_state (
               account_id INTEGER NOT NULL, peer_id INTEGER NOT NULL, peer_username TEXT, peer_name TEXT,
               status TEXT NOT NULL, reason TEXT NOT NULL, last_outbound_at TEXT, checked_at TEXT NOT NULL,
-              followup_sent_at TEXT, PRIMARY KEY(account_id, peer_id), FOREIGN KEY(account_id) REFERENCES accounts(id));
+              followup_sent_at TEXT, source_message_id INTEGER, PRIMARY KEY(account_id, peer_id), FOREIGN KEY(account_id) REFERENCES accounts(id));
             CREATE TABLE IF NOT EXISTS queue (
               id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL, peer_id INTEGER NOT NULL, status TEXT NOT NULL,
               planned_at TEXT NOT NULL, reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
@@ -54,6 +54,9 @@ class Store:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(queue)")}
             if "task_id" not in columns:
                 db.execute("ALTER TABLE queue ADD COLUMN task_id INTEGER REFERENCES tasks(id)")
+            state_columns = {row["name"] for row in db.execute("PRAGMA table_info(dialog_state)")}
+            if "source_message_id" not in state_columns:
+                db.execute("ALTER TABLE dialog_state ADD COLUMN source_message_id INTEGER")
             task_columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
             if "max_delay_seconds" not in task_columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN max_delay_seconds INTEGER NOT NULL DEFAULT 900")
@@ -139,16 +142,21 @@ class Store:
         with self.connect() as db:
             return db.execute("SELECT 1 FROM blacklist WHERE telegram_id=?", (peer_id,)).fetchone() is not None
 
-    def record_decision(self, account_id: int, peer_id: int, username: str | None, name: str | None, decision: Decision) -> None:
+    def dialog_source_message_id(self, account_id: int, peer_id: int) -> int | None:
+        with self.connect() as db:
+            row = db.execute("SELECT source_message_id FROM dialog_state WHERE account_id=? AND peer_id=?", (account_id, peer_id)).fetchone()
+        return int(row["source_message_id"]) if row and row["source_message_id"] else None
+
+    def record_decision(self, account_id: int, peer_id: int, username: str | None, name: str | None, decision: Decision, source_message_id: int | None = None) -> None:
         with self.connect() as db:
             prior = db.execute("SELECT followup_sent_at FROM dialog_state WHERE account_id=? AND peer_id=?", (account_id, peer_id)).fetchone()
             sent_at = prior["followup_sent_at"] if prior else None
-            db.execute("""INSERT INTO dialog_state(account_id,peer_id,peer_username,peer_name,status,reason,last_outbound_at,checked_at,followup_sent_at)
-                VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,peer_id) DO UPDATE SET
+            db.execute("""INSERT INTO dialog_state(account_id,peer_id,peer_username,peer_name,status,reason,last_outbound_at,checked_at,followup_sent_at,source_message_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,peer_id) DO UPDATE SET
                 peer_username=excluded.peer_username,peer_name=excluded.peer_name,status=excluded.status,reason=excluded.reason,
-                last_outbound_at=excluded.last_outbound_at,checked_at=excluded.checked_at""",
+                last_outbound_at=excluded.last_outbound_at,checked_at=excluded.checked_at,source_message_id=excluded.source_message_id""",
                 (account_id, peer_id, username, name, decision.status, decision.reason,
-                 decision.relevant_outbound_at.isoformat() if decision.relevant_outbound_at else None, utcnow(), sent_at))
+                 decision.relevant_outbound_at.isoformat() if decision.relevant_outbound_at else None, utcnow(), sent_at, source_message_id))
             if decision.status == DialogStatus.CANDIDATE and not sent_at:
                 db.execute("""INSERT INTO queue(account_id,peer_id,status,planned_at,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
                   ON CONFLICT(account_id,peer_id) DO UPDATE SET status=CASE WHEN queue.status IN ('sent','sending') THEN queue.status ELSE 'pending' END,

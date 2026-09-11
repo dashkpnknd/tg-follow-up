@@ -102,19 +102,33 @@ class FollowupService:
                 chat = dialog.chat
                 if chat.type != ChatType.PRIVATE or getattr(chat, "is_bot", False):
                     continue
+                source_message_id = getattr(dialog.top_message, "id", None)
+                # Re-listing dialogs is cheap compared to history retrieval. Once
+                # a chat has been classified, it is not read again unless a new
+                # message changes the dialog's latest-message ID.
+                if source_message_id and self.store.dialog_source_message_id(account_id, chat.id) == source_message_id:
+                    results["unchanged"] = results.get("unchanged", 0) + 1
+                    continue
                 if chat.id in known_replied:
                     decision = Decision(DialogStatus.REPLIED, "DialogHub уже зафиксировал входящий ответ клиента")
                 elif dialog.top_message and not dialog.top_message.outgoing:
                     decision = Decision(DialogStatus.REPLIED, "Последнее сообщение в чате — входящий ответ клиента")
                 else:
-                    history = []
-                    async for item in client.get_chat_history(chat.id, limit=self.settings.history_limit):
-                        history.append(Message(item.id, item.date, bool(item.outgoing), item.text or item.caption or ""))
-                    decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(chat.id))
-                    # Conservative scan pacing prevents history-import FloodWait.
-                    await asyncio.sleep(self.settings.scan_history_pause_seconds)
+                    try:
+                        history = []
+                        async for item in client.get_chat_history(chat.id, limit=self.settings.history_limit):
+                            history.append(Message(item.id, item.date, bool(item.outgoing), item.text or item.caption or ""))
+                        decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(chat.id))
+                        # Conservative scan pacing prevents history-import FloodWait.
+                        await asyncio.sleep(self.settings.scan_history_pause_seconds)
+                    except (TimeoutError, OSError, RPCError) as exc:
+                        self.store.audit("dialog_history_error", f"История не прочитана: {exc.__class__.__name__}", account_id, chat.id)
+                        results["history_error"] = results.get("history_error", 0) + 1
+                        # Do not save a source ID: the dialog will be retried on a
+                        # later scan, but it cannot stop the rest of the account.
+                        continue
                 name = " ".join(x for x in (chat.first_name, chat.last_name) if x)
-                self.store.record_decision(account_id, chat.id, chat.username, name, decision)
+                self.store.record_decision(account_id, chat.id, chat.username, name, decision, source_message_id)
                 if decision.blacklisting_phrase:
                     self.store.add_blacklist(chat.id, f"Автоматически: {decision.blacklisting_phrase}")
                 results[decision.status] = results.get(decision.status, 0) + 1

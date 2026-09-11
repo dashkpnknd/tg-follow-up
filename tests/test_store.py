@@ -14,8 +14,9 @@ class StoreTests(unittest.TestCase):
             store.import_account("session", "Account", "/tmp/session.session")
             account = store.accounts()[0]
             decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
-            store.record_decision(account["id"], 123, "name", "Name", decision)
-            store.record_decision(account["id"], 123, "name", "Name", decision)
+            store.record_decision(account["id"], 123, "name", "Name", decision, 99)
+            store.record_decision(account["id"], 123, "name", "Name", decision, 99)
+            self.assertEqual(store.dialog_source_message_id(account["id"], 123), 99)
             task_id, selected = store.create_task("Review first", 10)
             task = store.tasks()[0]
             self.assertEqual(task["id"], task_id)
