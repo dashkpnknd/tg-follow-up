@@ -120,13 +120,11 @@ async def send_delivery_report() -> None:
         return
     account = store.account(event["account_id"])
     account_title = account["title"] if account else "неизвестный аккаунт"
-    per_account = store.sent_today(event["account_id"])
-    total_sent = store.queue_summary().get("sent", 0)
+    total_sent = store.sent_today_total(store.setting("timezone", "Europe/Moscow") or "Europe/Moscow")
     await send_report(
-        "✉️ Дожим отправлен\n"
-        "Текст: «Фиксирую отказ?»\n"
+        f"✉️ Отправлен дожим «Фиксирую отказ?»\n"
         f"Аккаунт: {account_title}\n"
-        f"№ {per_account} с этого аккаунта сегодня · всего отправлено: {total_sent}"
+        f"Сегодня отправлено со всех аккаунтов: {total_sent}"
     )
 
 

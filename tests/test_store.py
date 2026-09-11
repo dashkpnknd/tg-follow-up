@@ -79,6 +79,22 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(store.pending(), [])
             self.assertEqual(store.account(account["id"])["send_status"], "unavailable")
 
+    def test_sent_today_total_counts_all_accounts(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("one", "One", "/tmp/one.session")
+            store.import_account("two", "Two", "/tmp/two.session")
+            first, second = store.accounts()
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            store.record_decision(first["id"], 1, None, None, decision, 1)
+            store.record_decision(second["id"], 2, None, None, decision, 2)
+            task_id, _ = store.create_task("Continuous", 0)
+            store.set_task_enabled(task_id, True)
+            rows = store.pending()
+            for row in rows:
+                store.mark_sent(row["id"], row["account_id"], row["peer_id"])
+            self.assertEqual(store.sent_today_total(), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

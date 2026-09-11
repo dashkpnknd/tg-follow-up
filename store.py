@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+from zoneinfo import ZoneInfo
 
 from analyzer import DEFAULT_FOLLOWUP, DEFAULT_STOP_WORDS, MIN_FOLLOWUP_AGE, Decision, DialogStatus
 
@@ -271,6 +272,17 @@ class Store:
     def sent_today(self, account_id: int, task_id: int | None = None) -> int:
         with self.connect() as db:
             return db.execute("SELECT COUNT(*) c FROM queue WHERE account_id=? AND status='sent' AND updated_at>=date('now') AND (? IS NULL OR task_id=?)", (account_id, task_id, task_id)).fetchone()["c"]
+
+    def sent_today_total(self, timezone_name: str = "Europe/Moscow") -> int:
+        """Count all sends since the start of the current local calendar day."""
+        local_now = datetime.now(ZoneInfo(timezone_name))
+        local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_utc = local_midnight.astimezone(timezone.utc).isoformat()
+        with self.connect() as db:
+            return db.execute(
+                "SELECT COUNT(*) c FROM queue WHERE status='sent' AND updated_at>=?",
+                (start_utc,),
+            ).fetchone()["c"]
 
     def last_sent_at(self, account_id: int) -> datetime | None:
         with self.connect() as db:
