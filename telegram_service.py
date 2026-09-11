@@ -8,9 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pyrogram import Client
-from pyrogram.enums import ChatType
-from pyrogram.errors import FloodWait, RPCError, Unauthorized
+from telethon import TelegramClient
+from telethon.crypto import AuthKey
+from telethon.errors import FloodWaitError, RPCError
+from telethon.sessions import MemorySession
+from telethon.tl.types import User
 
 from analyzer import Decision, DialogStatus, Message, classify
 from store import Store
@@ -61,11 +63,24 @@ class FollowupService:
         self.store.audit("dialoghub_import", f"Импортировано аккаунтов: {count}")
         return count
 
-    def _client(self, session_path: str) -> Client:
-        path = Path(session_path)
-        # DialogHub sessions were created by Pyrogram, so we use the same client
-        # library and an independent session-file copy.
-        return Client(str(path.with_suffix("")), self.settings.api_id, self.settings.api_hash, no_updates=True)
+    def _client(self, session_path: str) -> TelegramClient:
+        """Open a current Telethon client from a copied Pyrogram authorization.
+
+        Pyrogram sessions contain the same Telegram auth key but Pyrogram itself
+        does not support several newer Telegram constructors. MemorySession keeps
+        conversion read-only: neither DialogHub's file nor our copied session is
+        modified during normal scans.
+        """
+        source = sqlite3.connect(f"file:{Path(session_path)}?mode=ro", uri=True)
+        try:
+            dc_id, auth_key = next(iter(source.execute("SELECT dc_id,auth_key FROM sessions LIMIT 1")))
+        finally:
+            source.close()
+        servers = {1: "149.154.175.53", 2: "149.154.167.51", 3: "149.154.175.100", 4: "149.154.167.91", 5: "91.108.56.130"}
+        session = MemorySession()
+        session.set_dc(dc_id, servers.get(dc_id, servers[2]), 443)
+        session.auth_key = AuthKey(auth_key)
+        return TelegramClient(session, self.settings.api_id, self.settings.api_hash)
 
     @staticmethod
     def dialoghub_replied_peers(hub_db_path: str) -> dict[str, set[int]]:
@@ -94,15 +109,16 @@ class FollowupService:
         client = self._client(account["session_path"])
         results: dict[str, int] = {}
         try:
-            if not await client.connect():
+            await client.connect()
+            if not await client.is_user_authorized():
                 self.store.audit("auth_error", "Сессия не авторизована", account_id)
                 return {"auth_error": 1}
             known_replied = replied_peers or set()
-            async for dialog in client.get_dialogs():
-                chat = dialog.chat
-                if chat.type != ChatType.PRIVATE or getattr(chat, "is_bot", False):
+            async for dialog in client.iter_dialogs():
+                chat = dialog.entity
+                if not isinstance(chat, User) or getattr(chat, "bot", False):
                     continue
-                source_message_id = getattr(dialog.top_message, "id", None)
+                source_message_id = getattr(dialog.message, "id", None)
                 # Re-listing dialogs is cheap compared to history retrieval. Once
                 # a chat has been classified, it is not read again unless a new
                 # message changes the dialog's latest-message ID.
@@ -111,16 +127,21 @@ class FollowupService:
                     continue
                 if chat.id in known_replied:
                     decision = Decision(DialogStatus.REPLIED, "DialogHub уже зафиксировал входящий ответ клиента")
-                elif dialog.top_message and not dialog.top_message.outgoing:
+                elif dialog.message and not dialog.message.out:
                     decision = Decision(DialogStatus.REPLIED, "Последнее сообщение в чате — входящий ответ клиента")
                 else:
                     try:
                         history = []
-                        async for item in client.get_chat_history(chat.id, limit=self.settings.history_limit):
-                            history.append(Message(item.id, item.date, bool(item.outgoing), item.text or item.caption or ""))
+                        async for item in client.iter_messages(chat.id, limit=self.settings.history_limit):
+                            history.append(Message(item.id, item.date, bool(item.out), item.message or ""))
                         decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(chat.id))
                         # Conservative scan pacing prevents history-import FloodWait.
                         await asyncio.sleep(self.settings.scan_history_pause_seconds)
+                    except FloodWaitError as exc:
+                        self.store.audit("dialog_history_error", f"FloodWait: {exc.seconds} секунд", account_id, chat.id)
+                        results["history_error"] = results.get("history_error", 0) + 1
+                        await asyncio.sleep(exc.seconds)
+                        continue
                     except (TimeoutError, OSError, RPCError) as exc:
                         self.store.audit("dialog_history_error", f"История не прочитана: {exc.__class__.__name__}", account_id, chat.id)
                         results["history_error"] = results.get("history_error", 0) + 1
@@ -133,11 +154,11 @@ class FollowupService:
                     self.store.add_blacklist(chat.id, f"Автоматически: {decision.blacklisting_phrase}")
                 results[decision.status] = results.get(decision.status, 0) + 1
             self.store.audit("scan_finished", f"Просканировано: {sum(results.values())}", account_id)
-        except (RPCError, Unauthorized) as exc:
+        except RPCError as exc:
             self.store.audit("scan_error", str(exc), account_id)
             results["error"] = 1
         finally:
-            if client.is_connected:
+            if client.is_connected():
                 await client.disconnect()
         return results
 
@@ -159,23 +180,24 @@ class FollowupService:
             return "cancelled"
         client = self._client(account["session_path"])
         try:
-            if not await client.connect():
+            await client.connect()
+            if not await client.is_user_authorized():
                 return "auth_error"
-            entity = await client.get_chat(queue_row["peer_id"])
-            history = [Message(item.id, item.date, bool(item.outgoing), item.text or item.caption or "") async for item in client.get_chat_history(entity.id, limit=self.settings.history_limit)]
+            entity = await client.get_entity(queue_row["peer_id"])
+            history = [Message(item.id, item.date, bool(item.out), item.message or "") async for item in client.iter_messages(entity.id, limit=self.settings.history_limit)]
             decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(queue_row["peer_id"]))
             self.store.record_decision(account["id"], queue_row["peer_id"], entity.username, entity.first_name, decision)
             if decision.status != DialogStatus.CANDIDATE:
                 return "cancelled"
             await client.send_message(entity, queue_row["template"])
             return "sent"
-        except FloodWait as exc:
-            self.store.audit("flood_wait", f"FloodWait: {exc.value} секунд", queue_row["account_id"], queue_row["peer_id"])
-            return f"flood_wait:{exc.value}"
-        except (RPCError, Unauthorized) as exc:
+        except FloodWaitError as exc:
+            self.store.audit("flood_wait", f"FloodWait: {exc.seconds} секунд", queue_row["account_id"], queue_row["peer_id"])
+            return f"flood_wait:{exc.seconds}"
+        except RPCError as exc:
             return f"error:{exc.__class__.__name__}"
         finally:
-            if client.is_connected:
+            if client.is_connected():
                 await client.disconnect()
 
     async def run_delivery_tick(self) -> int:
