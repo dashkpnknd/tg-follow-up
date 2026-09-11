@@ -243,7 +243,7 @@ class Store:
             # Consider the head of each account's queue, rather than the first
             # N rows globally.  Without this, a large first account could hide
             # all other accounts behind its 10–15 minute cooldown.
-            return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,t.name task_name,t.template,
+            return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,ds.peer_access_hash,t.name task_name,t.template,
                  t.max_per_account_per_day,t.delay_seconds,t.max_delay_seconds,t.work_start_hour,t.work_end_hour
                  FROM queue q JOIN accounts a ON a.id=q.account_id JOIN tasks t ON t.id=q.task_id
                  LEFT JOIN dialog_state ds ON ds.account_id=q.account_id AND ds.peer_id=q.peer_id
