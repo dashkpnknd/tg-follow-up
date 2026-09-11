@@ -254,12 +254,12 @@ class Store:
                  t.max_per_account_per_day,t.delay_seconds,t.max_delay_seconds,t.work_start_hour,t.work_end_hour
                  FROM queue q JOIN accounts a ON a.id=q.account_id JOIN tasks t ON t.id=q.task_id
                  LEFT JOIN dialog_state ds ON ds.account_id=q.account_id AND ds.peer_id=q.peer_id
-                 WHERE q.status='pending' AND a.enabled=1 AND a.send_status!='unavailable' AND t.enabled=1
+                 WHERE q.status='pending' AND a.enabled=1 AND a.auth_status='authorized' AND a.send_status!='unavailable' AND t.enabled=1
                  AND q.id IN (
                    SELECT MIN(q2.id) FROM queue q2
                    JOIN accounts a2 ON a2.id=q2.account_id
                    JOIN tasks t2 ON t2.id=q2.task_id
-                   WHERE q2.status='pending' AND a2.enabled=1 AND a2.send_status!='unavailable' AND t2.enabled=1
+                   WHERE q2.status='pending' AND a2.enabled=1 AND a2.auth_status='authorized' AND a2.send_status!='unavailable' AND t2.enabled=1
                    GROUP BY q2.account_id
                  )
                  ORDER BY q.planned_at,q.id LIMIT ?""", (limit,)).fetchall()
