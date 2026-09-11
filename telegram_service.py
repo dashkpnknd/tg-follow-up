@@ -12,7 +12,7 @@ from telethon import TelegramClient
 from telethon.crypto import AuthKey
 from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import MemorySession
-from telethon.tl.types import User
+from telethon.tl.types import InputPeerUser, User
 
 from analyzer import Decision, DialogStatus, Message, classify
 from store import Store
@@ -119,12 +119,14 @@ class FollowupService:
                 if not isinstance(chat, User) or getattr(chat, "bot", False):
                     continue
                 source_message_id = getattr(dialog.message, "id", None)
+                access_hash = getattr(chat, "access_hash", None)
                 # Re-listing dialogs is cheap compared to history retrieval. Once
                 # a chat has been classified, it is not read again unless a new
                 # message changes the dialog's latest-message ID.
                 if (source_message_id
                     and self.store.dialog_source_message_id(account_id, chat.id) == source_message_id
                     and not self.store.dialog_requires_recheck(account_id, chat.id)):
+                    self.store.update_dialog_access_hash(account_id, chat.id, access_hash)
                     results["unchanged"] = results.get("unchanged", 0) + 1
                     continue
                 if chat.id in known_replied:
@@ -151,7 +153,7 @@ class FollowupService:
                         # later scan, but it cannot stop the rest of the account.
                         continue
                 name = " ".join(x for x in (chat.first_name, chat.last_name) if x)
-                self.store.record_decision(account_id, chat.id, chat.username, name, decision, source_message_id)
+                self.store.record_decision(account_id, chat.id, chat.username, name, decision, source_message_id, access_hash)
                 if decision.blacklisting_phrase:
                     self.store.add_blacklist(chat.id, f"Автоматически: {decision.blacklisting_phrase}")
                 results[decision.status] = results.get(decision.status, 0) + 1
@@ -185,13 +187,30 @@ class FollowupService:
             await client.connect()
             if not await client.is_user_authorized():
                 return "auth_error"
-            entity = await client.get_entity(queue_row["peer_id"])
-            history = [Message(item.id, item.date, bool(item.out), item.message or "") async for item in client.iter_messages(entity.id, limit=self.settings.history_limit)]
+            access_hash = queue_row["peer_access_hash"]
+            entity = None
+            if access_hash is not None:
+                peer = InputPeerUser(queue_row["peer_id"], access_hash)
+            else:
+                # Older candidates were collected before access hashes were
+                # persisted. Find this existing dialog once and backfill it;
+                # do not mistake a missing local cache record for a ban.
+                peer = None
+                async for dialog in client.iter_dialogs():
+                    if getattr(dialog.entity, "id", None) == queue_row["peer_id"]:
+                        entity = dialog.entity
+                        access_hash = getattr(entity, "access_hash", None)
+                        self.store.update_dialog_access_hash(account["id"], queue_row["peer_id"], access_hash)
+                        peer = entity
+                        break
+                if peer is None:
+                    return "cancelled"
+            history = [Message(item.id, item.date, bool(item.out), item.message or "") async for item in client.iter_messages(peer, limit=self.settings.history_limit)]
             decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(queue_row["peer_id"]))
-            self.store.record_decision(account["id"], queue_row["peer_id"], entity.username, entity.first_name, decision)
+            self.store.record_decision(account["id"], queue_row["peer_id"], getattr(entity, "username", None), getattr(entity, "first_name", None), decision, peer_access_hash=access_hash)
             if decision.status != DialogStatus.CANDIDATE:
                 return "cancelled"
-            await client.send_message(entity, queue_row["template"])
+            await client.send_message(peer, queue_row["template"])
             return "sent"
         except FloodWaitError as exc:
             self.store.audit("flood_wait", f"FloodWait: {exc.seconds} секунд", queue_row["account_id"], queue_row["peer_id"])

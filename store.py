@@ -37,7 +37,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS dialog_state (
               account_id INTEGER NOT NULL, peer_id INTEGER NOT NULL, peer_username TEXT, peer_name TEXT,
               status TEXT NOT NULL, reason TEXT NOT NULL, last_outbound_at TEXT, checked_at TEXT NOT NULL,
-              followup_sent_at TEXT, source_message_id INTEGER, PRIMARY KEY(account_id, peer_id), FOREIGN KEY(account_id) REFERENCES accounts(id));
+              followup_sent_at TEXT, source_message_id INTEGER, peer_access_hash INTEGER,
+              PRIMARY KEY(account_id, peer_id), FOREIGN KEY(account_id) REFERENCES accounts(id));
             CREATE TABLE IF NOT EXISTS queue (
               id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL, peer_id INTEGER NOT NULL, status TEXT NOT NULL,
               planned_at TEXT NOT NULL, reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
@@ -60,6 +61,8 @@ class Store:
             state_columns = {row["name"] for row in db.execute("PRAGMA table_info(dialog_state)")}
             if "source_message_id" not in state_columns:
                 db.execute("ALTER TABLE dialog_state ADD COLUMN source_message_id INTEGER")
+            if "peer_access_hash" not in state_columns:
+                db.execute("ALTER TABLE dialog_state ADD COLUMN peer_access_hash INTEGER")
             task_columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
             if "max_delay_seconds" not in task_columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN max_delay_seconds INTEGER NOT NULL DEFAULT 900")
@@ -154,6 +157,15 @@ class Store:
             row = db.execute("SELECT source_message_id FROM dialog_state WHERE account_id=? AND peer_id=?", (account_id, peer_id)).fetchone()
         return int(row["source_message_id"]) if row and row["source_message_id"] else None
 
+    def update_dialog_access_hash(self, account_id: int, peer_id: int, access_hash: int | None) -> None:
+        if access_hash is None:
+            return
+        with self.connect() as db:
+            db.execute(
+                "UPDATE dialog_state SET peer_access_hash=COALESCE(peer_access_hash,?) WHERE account_id=? AND peer_id=?",
+                (access_hash, account_id, peer_id),
+            )
+
     def dialog_requires_recheck(self, account_id: int, peer_id: int) -> bool:
         """Return true when a quiet dialog can become eligible without a new message.
 
@@ -177,16 +189,17 @@ class Store:
         ).fetchone()
         return int(row["id"]) if row else None
 
-    def record_decision(self, account_id: int, peer_id: int, username: str | None, name: str | None, decision: Decision, source_message_id: int | None = None) -> None:
+    def record_decision(self, account_id: int, peer_id: int, username: str | None, name: str | None, decision: Decision, source_message_id: int | None = None, peer_access_hash: int | None = None) -> None:
         with self.connect() as db:
             prior = db.execute("SELECT followup_sent_at FROM dialog_state WHERE account_id=? AND peer_id=?", (account_id, peer_id)).fetchone()
             sent_at = prior["followup_sent_at"] if prior else None
-            db.execute("""INSERT INTO dialog_state(account_id,peer_id,peer_username,peer_name,status,reason,last_outbound_at,checked_at,followup_sent_at,source_message_id)
-                VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,peer_id) DO UPDATE SET
+            db.execute("""INSERT INTO dialog_state(account_id,peer_id,peer_username,peer_name,status,reason,last_outbound_at,checked_at,followup_sent_at,source_message_id,peer_access_hash)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,peer_id) DO UPDATE SET
                 peer_username=excluded.peer_username,peer_name=excluded.peer_name,status=excluded.status,reason=excluded.reason,
-                last_outbound_at=excluded.last_outbound_at,checked_at=excluded.checked_at,source_message_id=excluded.source_message_id""",
+                last_outbound_at=excluded.last_outbound_at,checked_at=excluded.checked_at,source_message_id=excluded.source_message_id,
+                peer_access_hash=COALESCE(excluded.peer_access_hash,dialog_state.peer_access_hash)""",
                 (account_id, peer_id, username, name, decision.status, decision.reason,
-                 decision.relevant_outbound_at.isoformat() if decision.relevant_outbound_at else None, utcnow(), sent_at, source_message_id))
+                 decision.relevant_outbound_at.isoformat() if decision.relevant_outbound_at else None, utcnow(), sent_at, source_message_id, peer_access_hash))
             if decision.status == DialogStatus.CANDIDATE and not sent_at:
                 active_task_id = self._active_auto_task_id(db)
                 db.execute("""INSERT INTO queue(account_id,peer_id,status,planned_at,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
@@ -233,6 +246,7 @@ class Store:
             return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,t.name task_name,t.template,
                  t.max_per_account_per_day,t.delay_seconds,t.max_delay_seconds,t.work_start_hour,t.work_end_hour
                  FROM queue q JOIN accounts a ON a.id=q.account_id JOIN tasks t ON t.id=q.task_id
+                 LEFT JOIN dialog_state ds ON ds.account_id=q.account_id AND ds.peer_id=q.peer_id
                  WHERE q.status='pending' AND a.enabled=1 AND a.send_status!='unavailable' AND t.enabled=1
                  AND q.id IN (
                    SELECT MIN(q2.id) FROM queue q2

@@ -95,6 +95,18 @@ class StoreTests(unittest.TestCase):
                 store.mark_sent(row["id"], row["account_id"], row["peer_id"])
             self.assertEqual(store.sent_today_total(), 2)
 
+    def test_access_hash_is_saved_and_preserved(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("session", "Account", "/tmp/session.session")
+            account = store.accounts()[0]
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            store.record_decision(account["id"], 99, None, None, decision, 1, 12345)
+            store.record_decision(account["id"], 99, None, None, decision, 1)
+            with store.connect() as db:
+                value = db.execute("SELECT peer_access_hash FROM dialog_state WHERE account_id=? AND peer_id=?", (account["id"], 99)).fetchone()["peer_access_hash"]
+            self.assertEqual(value, 12345)
+
 
 if __name__ == "__main__":
     unittest.main()
