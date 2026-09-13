@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterator
 from zoneinfo import ZoneInfo
 
-from analyzer import DEFAULT_FOLLOWUP, DEFAULT_STOP_WORDS, MIN_FOLLOWUP_AGE, Decision, DialogStatus
+from analyzer import DEFAULT_FOLLOWUP, DEFAULT_FOLLOWUP_VARIANTS, DEFAULT_STOP_WORDS, MIN_FOLLOWUP_AGE, Decision, DialogStatus
 
 
 def utcnow() -> str:
@@ -42,7 +42,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS queue (
               id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL, peer_id INTEGER NOT NULL, status TEXT NOT NULL,
               planned_at TEXT NOT NULL, reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
-              created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(account_id, peer_id),
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL, sent_template TEXT, UNIQUE(account_id, peer_id),
               FOREIGN KEY(account_id) REFERENCES accounts(id));
             CREATE TABLE IF NOT EXISTS tasks (
               id INTEGER PRIMARY KEY, name TEXT NOT NULL, template TEXT NOT NULL,
@@ -50,6 +50,7 @@ class Store:
               delay_seconds INTEGER NOT NULL DEFAULT 600, max_delay_seconds INTEGER NOT NULL DEFAULT 900, work_start_hour INTEGER NOT NULL DEFAULT 10,
               work_end_hour INTEGER NOT NULL DEFAULT 20,
               auto_include_new INTEGER NOT NULL DEFAULT 1,
+              templates_json TEXT,
               created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS audit_log (
               id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, account_id INTEGER, peer_id INTEGER,
@@ -58,6 +59,8 @@ class Store:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(queue)")}
             if "task_id" not in columns:
                 db.execute("ALTER TABLE queue ADD COLUMN task_id INTEGER REFERENCES tasks(id)")
+            if "sent_template" not in columns:
+                db.execute("ALTER TABLE queue ADD COLUMN sent_template TEXT")
             state_columns = {row["name"] for row in db.execute("PRAGMA table_info(dialog_state)")}
             if "source_message_id" not in state_columns:
                 db.execute("ALTER TABLE dialog_state ADD COLUMN source_message_id INTEGER")
@@ -70,9 +73,14 @@ class Store:
                 # Existing tasks retain their current queue until explicitly
                 # enabled; from that point new eligible dialogs join them too.
                 db.execute("ALTER TABLE tasks ADD COLUMN auto_include_new INTEGER NOT NULL DEFAULT 1")
+            if "templates_json" not in task_columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN templates_json TEXT")
+                for task in db.execute("SELECT id,template FROM tasks"):
+                    db.execute("UPDATE tasks SET templates_json=? WHERE id=?", (json.dumps([task["template"]], ensure_ascii=False), task["id"]))
             self.set_default(db, "global_paused", "1")
             self.set_default(db, "delivery_enabled", "0")
             self.set_default(db, "followup_template", DEFAULT_FOLLOWUP)
+            self.set_default(db, "followup_templates", json.dumps(DEFAULT_FOLLOWUP_VARIANTS, ensure_ascii=False))
             self.set_default(db, "task_max_per_account_per_day", "20")
             self.set_default(db, "task_delay_seconds", "600")
             self.set_default(db, "task_max_delay_seconds", "900")
@@ -105,6 +113,54 @@ class Store:
     def set_setting(self, key: str, value: str) -> None:
         with self.connect() as db:
             db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    @staticmethod
+    def _normalise_templates(values: list[str] | tuple[str, ...]) -> list[str]:
+        result: list[str] = []
+        for value in values:
+            text = " ".join(str(value).split())[:500]
+            if text and text not in result:
+                result.append(text)
+        if not result:
+            raise ValueError("Нужен хотя бы один текст дожима")
+        return result
+
+    def followup_templates(self) -> list[str]:
+        raw = self.setting("followup_templates")
+        try:
+            values = json.loads(raw or "[]")
+            if isinstance(values, list):
+                return self._normalise_templates(values)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+        return [self.setting("followup_template", DEFAULT_FOLLOWUP) or DEFAULT_FOLLOWUP]
+
+    def set_followup_templates(self, values: list[str]) -> None:
+        templates = self._normalise_templates(values)
+        self.set_setting("followup_templates", json.dumps(templates, ensure_ascii=False))
+        self.set_setting("followup_template", templates[0])
+
+    def task_templates(self, task_id: int) -> list[str]:
+        with self.connect() as db:
+            row = db.execute("SELECT templates_json,template FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            return []
+        try:
+            values = json.loads(row["templates_json"] or "[]")
+            if isinstance(values, list):
+                return self._normalise_templates(values)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+        return [row["template"]]
+
+    def set_task_templates(self, task_id: int, values: list[str]) -> bool:
+        templates = self._normalise_templates(values)
+        with self.connect() as db:
+            result = db.execute(
+                "UPDATE tasks SET template=?,templates_json=?,updated_at=? WHERE id=?",
+                (templates[0], json.dumps(templates, ensure_ascii=False), utcnow(), task_id),
+            )
+            return result.rowcount == 1
 
     def audit(self, kind: str, details: str, account_id: int | None = None, peer_id: int | None = None) -> None:
         with self.connect() as db:
@@ -250,7 +306,7 @@ class Store:
             # Consider the head of each account's queue, rather than the first
             # N rows globally.  Without this, a large first account could hide
             # all other accounts behind its 10–15 minute cooldown.
-            return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,ds.peer_access_hash,t.name task_name,t.template,
+            return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,ds.peer_access_hash,t.name task_name,t.template,t.templates_json,
                  t.max_per_account_per_day,t.delay_seconds,t.max_delay_seconds,t.work_start_hour,t.work_end_hour
                  FROM queue q JOIN accounts a ON a.id=q.account_id JOIN tasks t ON t.id=q.task_id
                  LEFT JOIN dialog_state ds ON ds.account_id=q.account_id AND ds.peer_id=q.peer_id
@@ -268,9 +324,9 @@ class Store:
         with self.connect() as db:
             db.execute("UPDATE queue SET status=?,last_error=?,attempts=attempts+?,updated_at=? WHERE id=?", (status, error, int(status == 'error'), utcnow(), queue_id))
 
-    def mark_sent(self, queue_id: int, account_id: int, peer_id: int) -> None:
+    def mark_sent(self, queue_id: int, account_id: int, peer_id: int, template: str) -> None:
         with self.connect() as db:
-            db.execute("UPDATE queue SET status='sent',updated_at=? WHERE id=?", (utcnow(), queue_id))
+            db.execute("UPDATE queue SET status='sent',sent_template=?,updated_at=? WHERE id=?", (template, utcnow(), queue_id))
             db.execute("UPDATE dialog_state SET status='followup_sent',reason='Дожим успешно отправлен',followup_sent_at=?,checked_at=? WHERE account_id=? AND peer_id=?", (utcnow(), utcnow(), account_id, peer_id))
 
     def disable_sending_for_account(self, account_id: int, reason: str) -> int:
@@ -305,6 +361,12 @@ class Store:
                 (start_utc,),
             ).fetchone()["c"]
 
+    def latest_sent(self):
+        with self.connect() as db:
+            return db.execute("""SELECT q.sent_template,a.title FROM queue q
+                JOIN accounts a ON a.id=q.account_id WHERE q.status='sent'
+                ORDER BY q.updated_at DESC,q.id DESC LIMIT 1""").fetchone()
+
     def last_sent_at(self, account_id: int) -> datetime | None:
         with self.connect() as db:
             row = db.execute("SELECT MAX(updated_at) AS value FROM queue WHERE account_id=? AND status='sent'", (account_id,)).fetchone()
@@ -312,15 +374,16 @@ class Store:
 
     def create_task(self, name: str, sample_limit: int, template: str | None = None) -> tuple[int, int]:
         """Create a task from the current pool; enabled tasks also accept new candidates."""
-        effective_template = template or self.setting("followup_template") or DEFAULT_FOLLOWUP
+        templates = [template] if template else self.followup_templates()
+        effective_template = templates[0]
         max_per_day = int(self.setting("task_max_per_account_per_day", "20") or "20")
         delay = int(self.setting("task_delay_seconds", "600") or "600")
         max_delay = int(self.setting("task_max_delay_seconds", "900") or "900")
         work_start = int(self.setting("task_work_start_hour", "10") or "10")
         work_end = int(self.setting("task_work_end_hour", "20") or "20")
         with self.connect() as db:
-            cursor = db.execute("""INSERT INTO tasks(name,template,max_per_account_per_day,delay_seconds,max_delay_seconds,work_start_hour,work_end_hour,auto_include_new,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?)""", (name.strip()[:100], effective_template, max_per_day, delay, max(max_delay, delay), work_start, work_end, 1, utcnow(), utcnow()))
+            cursor = db.execute("""INSERT INTO tasks(name,template,max_per_account_per_day,delay_seconds,max_delay_seconds,work_start_hour,work_end_hour,auto_include_new,templates_json,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (name.strip()[:100], effective_template, max_per_day, delay, max(max_delay, delay), work_start, work_end, 1, json.dumps(templates, ensure_ascii=False), utcnow(), utcnow()))
             task_id = cursor.lastrowid
             if sample_limit == 0:
                 result = db.execute("UPDATE queue SET task_id=?,updated_at=? WHERE status='pending' AND task_id IS NULL", (task_id, utcnow()))

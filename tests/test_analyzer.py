@@ -28,6 +28,13 @@ class AnalyzerTests(unittest.TestCase):
     def test_existing_followup_is_never_repeated(self):
         self.assertEqual(classify([self.message(True, "Фиксирую отказ?")], now=NOW).status, DialogStatus.FOLLOWUP_SENT)
 
+    def test_any_configured_followup_variant_is_never_repeated(self):
+        history = [self.message(True, "Вы отказываетесь от трафика?")]
+        self.assertEqual(
+            classify(history, followup_text=("Фиксирую отказ?", "Вы отказываетесь от трафика?"), now=NOW).status,
+            DialogStatus.FOLLOWUP_SENT,
+        )
+
     def test_fresh_dialog_is_excluded(self):
         self.assertEqual(classify([self.message(True, "Здравствуйте", 47)], now=NOW).status, DialogStatus.TOO_FRESH)
 

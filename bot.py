@@ -115,14 +115,13 @@ def scan_report(totals: dict[str, int]) -> str:
 
 
 async def send_delivery_report() -> None:
-    event = next((row for row in store.recent_logs(5) if row["kind"] == "followup_sent"), None)
-    if not event:
+    last_sent = store.latest_sent()
+    if not last_sent:
         return
-    account = store.account(event["account_id"])
-    account_title = account["title"] if account else "неизвестный аккаунт"
+    account_title = last_sent["title"] or "неизвестный аккаунт"
     total_sent = store.sent_today_total(store.setting("timezone", "Europe/Moscow") or "Europe/Moscow")
     await send_report(
-        f"✉️ Отправлен дожим «Фиксирую отказ?»\n"
+        f"✉️ Отправлен дожим: «{last_sent['sent_template']}»\n"
         f"Аккаунт: {account_title}\n"
         f"Сегодня отправлено со всех аккаунтов: {total_sent}"
     )
@@ -345,7 +344,8 @@ async def stop_word_remove(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "template")
 async def template(query: CallbackQuery):
     if await reject_if_needed(query): return
-    await query.message.answer(f"✉️ Текущий шаблон:\n{store.setting('followup_template')}", reply_markup=kb(("✏️ Изменить", "template_edit"), ("◀️ Меню", "menu")))
+    templates = "\n".join(f"• {text}" for text in store.followup_templates())
+    await query.message.answer(f"✉️ Тексты дожима (выбираются случайно):\n{templates}", reply_markup=kb(("✏️ Изменить", "template_edit"), ("◀️ Меню", "menu")))
     await query.answer()
 
 
@@ -353,7 +353,7 @@ async def template(query: CallbackQuery):
 async def template_edit(query: CallbackQuery, state: FSMContext):
     if await reject_if_needed(query): return
     await state.set_state(Flow.template)
-    await query.message.answer("Пришлите новый текст шаблона.")
+    await query.message.answer("Пришлите один или несколько текстов: каждый вариант с новой строки. Они будут выбираться случайно для новых задач.")
     await query.answer()
 
 
@@ -364,10 +364,15 @@ async def template_save(message: Message, state: FSMContext):
     if not text:
         await message.answer("Текст не может быть пустым.")
         return
-    store.set_setting("followup_template", text)
-    store.audit("template_changed", text)
+    templates = [line for line in text.splitlines() if line.strip()]
+    try:
+        store.set_followup_templates(templates)
+    except ValueError:
+        await message.answer("Нужен хотя бы один непустой текст.")
+        return
+    store.audit("template_changed", "Обновлено вариантов: " + str(len(templates)))
     await state.clear()
-    await message.answer("✅ Шаблон сохранён. Он будет применён только к новым задачам.")
+    await message.answer("✅ Тексты сохранены. Они будут применены случайно только к новым задачам.")
 
 
 @dp.callback_query(F.data == "statistics")

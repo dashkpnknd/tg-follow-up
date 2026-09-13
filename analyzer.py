@@ -9,6 +9,11 @@ import re
 from typing import Iterable
 
 DEFAULT_FOLLOWUP = "Фиксирую отказ?"
+DEFAULT_FOLLOWUP_VARIANTS = (
+    DEFAULT_FOLLOWUP,
+    "Вы отказываетесь от трафика?",
+    "Вы отказываетесь от недели бесплатного трафика?",
+)
 MIN_FOLLOWUP_AGE = timedelta(hours=48)
 APPLICATION_MARKERS = ("@gelikky", "@localtraffic")
 DEFAULT_STOP_WORDS = (
@@ -67,7 +72,7 @@ def classify(
     *,
     stop_words: Iterable[str] = DEFAULT_STOP_WORDS,
     is_blacklisted: bool = False,
-    followup_text: str = DEFAULT_FOLLOWUP,
+    followup_text: str | Iterable[str] = DEFAULT_FOLLOWUP,
     now: datetime | None = None,
     min_age: timedelta = MIN_FOLLOWUP_AGE,
 ) -> Decision:
@@ -88,7 +93,8 @@ def classify(
     if marker:
         return Decision(DialogStatus.APPLICATION, f"Найден признак заявки: {marker}")
 
-    if _matches(all_text, (followup_text,)):
+    followup_texts = (followup_text,) if isinstance(followup_text, str) else followup_text
+    if _matches(all_text, followup_texts):
         return Decision(DialogStatus.FOLLOWUP_SENT, "Дожим уже найден в истории Telegram")
 
     outgoing = [item for item in history if item.outgoing]

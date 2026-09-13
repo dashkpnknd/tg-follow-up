@@ -97,7 +97,7 @@ class StoreTests(unittest.TestCase):
             store.set_task_enabled(task_id, True)
             rows = store.pending()
             for row in rows:
-                store.mark_sent(row["id"], row["account_id"], row["peer_id"])
+                store.mark_sent(row["id"], row["account_id"], row["peer_id"], "Тест")
             self.assertEqual(store.sent_today_total(), 2)
 
     def test_access_hash_is_saved_and_preserved(self):
@@ -119,6 +119,15 @@ class StoreTests(unittest.TestCase):
             account = store.accounts()[0]
             store.set_account_auth_status(account["id"], "authorized")
             self.assertEqual(store.account(account["id"])["auth_status"], "authorized")
+
+    def test_task_snapshots_all_followup_variants(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.set_followup_templates(["Первый", "Второй", "Первый"])
+            task_id, _ = store.create_task("Variants", 0)
+            self.assertEqual(store.task_templates(task_id), ["Первый", "Второй"])
+            store.set_followup_templates(["Третий"])
+            self.assertEqual(store.task_templates(task_id), ["Первый", "Второй"])
 
 
 if __name__ == "__main__":

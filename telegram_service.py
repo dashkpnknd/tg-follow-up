@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -174,7 +176,7 @@ class FollowupService:
                         history = []
                         async for item in client.iter_messages(chat.id, limit=self.settings.history_limit):
                             history.append(Message(item.id, item.date, bool(item.out), item.message or ""))
-                        decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(chat.id))
+                        decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(chat.id), followup_text=self.store.followup_templates())
                         # Conservative scan pacing prevents history-import FloodWait.
                         await asyncio.sleep(self.settings.scan_history_pause_seconds)
                     except FloodWaitError as exc:
@@ -250,12 +252,17 @@ class FollowupService:
                 if peer is None:
                     return "cancelled"
             history = [Message(item.id, item.date, bool(item.out), item.message or "") async for item in client.iter_messages(peer, limit=self.settings.history_limit)]
-            decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(queue_row["peer_id"]))
+            try:
+                templates = self.store._normalise_templates(json.loads(queue_row["templates_json"] or "[]"))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                templates = [queue_row["template"]]
+            decision = classify(history, stop_words=self.store.active_stop_words(), is_blacklisted=self.store.is_blacklisted(queue_row["peer_id"]), followup_text=templates)
             self.store.record_decision(account["id"], queue_row["peer_id"], getattr(entity, "username", None), getattr(entity, "first_name", None), decision, peer_access_hash=access_hash)
             if decision.status != DialogStatus.CANDIDATE:
                 return "cancelled"
-            await client.send_message(peer, queue_row["template"])
-            return "sent"
+            template = random.SystemRandom().choice(templates)
+            await client.send_message(peer, template)
+            return f"sent:{template}"
         except FloodWaitError as exc:
             self.store.audit("flood_wait", f"FloodWait: {exc.seconds} секунд", queue_row["account_id"], queue_row["peer_id"])
             return f"flood_wait:{exc.seconds}"
@@ -290,9 +297,10 @@ class FollowupService:
                     continue
             self.store.mark_queue(row["id"], "sending")
             result = await self.preflight_and_send(row)
-            if result == "sent":
-                self.store.mark_sent(row["id"], row["account_id"], row["peer_id"])
-                self.store.audit("followup_sent", "Дожим отправлен после финальной проверки", row["account_id"], row["peer_id"])
+            if result.startswith("sent:"):
+                template = result.removeprefix("sent:")
+                self.store.mark_sent(row["id"], row["account_id"], row["peer_id"], template)
+                self.store.audit("followup_sent", f"Дожим отправлен: {template}", row["account_id"], row["peer_id"])
             elif result == "cancelled":
                 self.store.mark_queue(row["id"], "cancelled")
             elif result == "blocked":
@@ -308,5 +316,5 @@ class FollowupService:
                 # or provoke repeated send attempts.
                 cancelled = self.store.disable_sending_for_account(row["account_id"], result)
                 self.store.audit("account_send_disabled", f"Аккаунт исключён из отправки: {result}; отменено в очереди: {cancelled}", row["account_id"])
-            return int(result == "sent")
+            return int(result.startswith("sent:"))
         return 0
