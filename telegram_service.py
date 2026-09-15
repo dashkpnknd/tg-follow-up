@@ -221,9 +221,9 @@ class FollowupService:
                 totals[key] = totals.get(key, 0) + value
         return totals
 
-    async def preflight_and_send(self, queue_row) -> str:
-        """Re-read the complete dialog at send time before every delivery."""
-        if self.store.setting("global_paused") == "1" or self.store.setting("delivery_enabled") != "1":
+    async def preflight_and_send(self, queue_row, *, send: bool = True) -> str:
+        """Re-read the complete dialog before delivery or a no-send audit."""
+        if send and (self.store.setting("global_paused") == "1" or self.store.setting("delivery_enabled") != "1"):
             return "blocked"
         account = self.store.account(queue_row["account_id"])
         if not account or not account["enabled"]:
@@ -264,6 +264,8 @@ class FollowupService:
             self.store.record_decision(account["id"], queue_row["peer_id"], getattr(entity, "username", None), getattr(entity, "first_name", None), decision, peer_access_hash=access_hash)
             if decision.status != DialogStatus.CANDIDATE:
                 return "cancelled"
+            if not send:
+                return "validated"
             template = random.SystemRandom().choice(templates)
             await client.send_message(peer, template)
             return f"sent:{template}"
@@ -280,6 +282,25 @@ class FollowupService:
         finally:
             if client.is_connected():
                 await client.disconnect()
+
+    async def run_revalidation_tick(self) -> str:
+        """Validate one queued dialog without sending a message."""
+        rows = self.store.pending_revalidation(limit=1)
+        if not rows:
+            return "complete"
+        row = rows[0]
+        result = await self.preflight_and_send(row, send=False)
+        if result == "validated":
+            self.store.mark_validated(row["id"])
+            return "validated"
+        if result == "cancelled" or result.startswith("peer_error:"):
+            self.store.mark_queue(row["id"], "cancelled", result)
+            return "excluded"
+        if result == "auth_error" or result.startswith("error:") or result.startswith("flood_wait"):
+            self.store.mark_queue(row["id"], "error", result)
+            self.store.audit("revalidation_error", result, row["account_id"], row["peer_id"])
+            return "error"
+        return result
 
     async def run_delivery_tick(self) -> int:
         """Deliver at most one eligible item per tick; harmless while paused or no task is enabled."""

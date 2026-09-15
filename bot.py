@@ -532,6 +532,28 @@ async def scan_loop():
         await asyncio.sleep(int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))
 
 
+async def revalidation_loop():
+    """Safely clean old candidates before delivery resumes."""
+    while True:
+        try:
+            if store.setting("revalidation_active") == "1":
+                result = await service.run_revalidation_tick()
+                if result == "complete":
+                    summary = store.revalidation_summary()
+                    store.set_setting("revalidation_active", "0")
+                    store.set_setting("auto_scan_enabled", store.setting("revalidation_resume_scan", "1") or "1")
+                    if store.setting("revalidation_resume_delivery", "1") == "1":
+                        store.set_setting("global_paused", "0")
+                    store.audit("revalidation_finished", f"Полная проверка: безопасно {summary['safe']}, исключено {summary['excluded']}")
+                    await send_report(f"✅ Полная перепроверка очереди завершена\nБезопасных чатов: {summary['safe']}\nИсключено: {summary['excluded']}")
+                await asyncio.sleep(float(os.getenv("REVALIDATION_INTERVAL_SECONDS", "3")))
+            else:
+                await asyncio.sleep(5)
+        except Exception:
+            log.exception("Queue revalidation failed")
+            await asyncio.sleep(10)
+
+
 async def main():
     if ACCESS_MODE not in {"public", "group_admins"}:
         raise RuntimeError("ACCESS_MODE must be public or group_admins")
@@ -540,6 +562,7 @@ async def main():
     report_bot = bot
     asyncio.create_task(delivery_loop())
     asyncio.create_task(scan_loop())
+    asyncio.create_task(revalidation_loop())
     await dp.start_polling(bot)
 
 

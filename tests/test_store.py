@@ -129,6 +129,22 @@ class StoreTests(unittest.TestCase):
             store.set_followup_templates(["Третий"])
             self.assertEqual(store.task_templates(task_id), ["Первый", "Второй"])
 
+    def test_revalidation_marks_and_reopens_candidate(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("session", "Account", "/tmp/session.session")
+            account = store.accounts()[0]
+            store.set_account_auth_status(account["id"], "authorized")
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            store.record_decision(account["id"], 888, None, None, decision, 1)
+            task_id, _ = store.create_task("Audit", 0)
+            store.set_task_enabled(task_id, True)
+            row = store.pending_revalidation()[0]
+            store.mark_validated(row["id"])
+            self.assertEqual(store.pending_revalidation(), [])
+            store.record_decision(account["id"], 888, None, None, decision, 2)
+            self.assertEqual(len(store.pending_revalidation()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

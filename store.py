@@ -42,7 +42,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS queue (
               id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL, peer_id INTEGER NOT NULL, status TEXT NOT NULL,
               planned_at TEXT NOT NULL, reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
-              created_at TEXT NOT NULL, updated_at TEXT NOT NULL, sent_template TEXT, UNIQUE(account_id, peer_id),
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL, sent_template TEXT, validated_at TEXT,
+              UNIQUE(account_id, peer_id),
               FOREIGN KEY(account_id) REFERENCES accounts(id));
             CREATE TABLE IF NOT EXISTS tasks (
               id INTEGER PRIMARY KEY, name TEXT NOT NULL, template TEXT NOT NULL,
@@ -61,6 +62,8 @@ class Store:
                 db.execute("ALTER TABLE queue ADD COLUMN task_id INTEGER REFERENCES tasks(id)")
             if "sent_template" not in columns:
                 db.execute("ALTER TABLE queue ADD COLUMN sent_template TEXT")
+            if "validated_at" not in columns:
+                db.execute("ALTER TABLE queue ADD COLUMN validated_at TEXT")
             state_columns = {row["name"] for row in db.execute("PRAGMA table_info(dialog_state)")}
             if "source_message_id" not in state_columns:
                 db.execute("ALTER TABLE dialog_state ADD COLUMN source_message_id INTEGER")
@@ -88,6 +91,9 @@ class Store:
             self.set_default(db, "task_work_end_hour", "20")
             self.set_default(db, "timezone", "Europe/Moscow")
             self.set_default(db, "auto_scan_enabled", "1")
+            self.set_default(db, "revalidation_active", "0")
+            self.set_default(db, "revalidation_resume_delivery", "1")
+            self.set_default(db, "revalidation_resume_scan", "1")
             for phrase in DEFAULT_STOP_WORDS:
                 db.execute("INSERT OR IGNORE INTO stop_words(phrase,created_at) VALUES(?,?)", (phrase, utcnow()))
 
@@ -267,7 +273,8 @@ class Store:
                 active_task_id = self._active_auto_task_id(db)
                 db.execute("""INSERT INTO queue(account_id,peer_id,status,planned_at,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
                   ON CONFLICT(account_id,peer_id) DO UPDATE SET status=CASE WHEN queue.status IN ('sent','sending') THEN queue.status ELSE 'pending' END,
-                  reason=excluded.reason,updated_at=excluded.updated_at""", (account_id, peer_id, "pending", utcnow(), decision.reason, utcnow(), utcnow()))
+                  reason=excluded.reason,validated_at=CASE WHEN queue.status IN ('sent','sending') THEN queue.validated_at ELSE NULL END,
+                  updated_at=excluded.updated_at""", (account_id, peer_id, "pending", utcnow(), decision.reason, utcnow(), utcnow()))
                 # Do not move a candidate that was deliberately put into a
                 # different task.  Only unassigned, newly discovered dialogs
                 # join the currently enabled automatic task.
@@ -323,6 +330,30 @@ class Store:
     def mark_queue(self, queue_id: int, status: str, error: str | None = None) -> None:
         with self.connect() as db:
             db.execute("UPDATE queue SET status=?,last_error=?,attempts=attempts+?,updated_at=? WHERE id=?", (status, error, int(status == 'error'), utcnow(), queue_id))
+
+    def pending_revalidation(self, limit: int = 1):
+        """Rows not yet checked against their complete conversation history."""
+        with self.connect() as db:
+            return db.execute("""SELECT q.*,a.session_name,a.session_path,a.enabled,ds.peer_access_hash,t.name task_name,t.template,t.templates_json,
+                 t.max_per_account_per_day,t.delay_seconds,t.max_delay_seconds,t.work_start_hour,t.work_end_hour
+                 FROM queue q JOIN accounts a ON a.id=q.account_id JOIN tasks t ON t.id=q.task_id
+                 LEFT JOIN dialog_state ds ON ds.account_id=q.account_id AND ds.peer_id=q.peer_id
+                 WHERE q.status='pending' AND q.validated_at IS NULL AND a.enabled=1
+                 AND a.auth_status='authorized' AND a.send_status!='unavailable' AND t.enabled=1
+                 ORDER BY q.id LIMIT ?""", (limit,)).fetchall()
+
+    def mark_validated(self, queue_id: int) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE queue SET validated_at=?,updated_at=? WHERE id=?", (utcnow(), utcnow(), queue_id))
+
+    def revalidation_summary(self) -> dict[str, int]:
+        with self.connect() as db:
+            row = db.execute("""SELECT
+                SUM(CASE WHEN status='pending' AND validated_at IS NULL THEN 1 ELSE 0 END) remaining,
+                SUM(CASE WHEN status='pending' AND validated_at IS NOT NULL THEN 1 ELSE 0 END) safe,
+                SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) excluded
+                FROM queue""").fetchone()
+        return {key: int(row[key] or 0) for key in ("remaining", "safe", "excluded")}
 
     def mark_sent(self, queue_id: int, account_id: int, peer_id: int, template: str) -> None:
         with self.connect() as db:
