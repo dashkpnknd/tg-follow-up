@@ -222,7 +222,7 @@ class FollowupService:
         return totals
 
     async def preflight_and_send(self, queue_row) -> str:
-        """Re-read the full dialog at send time. It refuses to bypass Telegram limits."""
+        """Re-read the complete dialog at send time before every delivery."""
         if self.store.setting("global_paused") == "1" or self.store.setting("delivery_enabled") != "1":
             return "blocked"
         account = self.store.account(queue_row["account_id"])
@@ -251,7 +251,11 @@ class FollowupService:
                         break
                 if peer is None:
                     return "cancelled"
-            history = [Message(item.id, item.date, bool(item.out), item.message or "") async for item in client.iter_messages(peer, limit=self.settings.history_limit)]
+            # A 100-message tail is insufficient for safety: a client can have
+            # agreed to a call earlier and received a later outbound message.
+            # This final gate reads the complete existing dialog and rejects
+            # any chat with even one inbound reply.
+            history = [Message(item.id, item.date, bool(item.out), item.message or "") async for item in client.iter_messages(peer, limit=None)]
             try:
                 templates = self.store._normalise_templates(json.loads(queue_row["templates_json"] or "[]"))
             except (ValueError, TypeError, json.JSONDecodeError):

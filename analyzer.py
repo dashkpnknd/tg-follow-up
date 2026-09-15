@@ -78,9 +78,11 @@ def classify(
 ) -> Decision:
     """Classify a dialog without inferring intent from silence.
 
-    A candidate is strictly a private conversation with an outbound message, no
-    later inbound message, no known application/refusal/follow-up, and 48 hours
-    elapsed. This is intentionally more conservative than the older finisher.
+    A candidate is strictly a private conversation with an outbound message and
+    no inbound message anywhere in the conversation. Once a person has replied,
+    even if the team subsequently sends another message, that chat is never a
+    follow-up candidate. This is intentionally more conservative than the
+    older finisher.
     """
     history = sorted(messages, key=lambda item: (item.date, item.id))
     if not history:
@@ -102,16 +104,16 @@ def classify(
         return Decision(DialogStatus.NO_OUTBOUND, "Нет нашего исходящего сообщения")
     relevant = outgoing[-1]
 
-    incoming_after = [item for item in history if not item.outgoing and item.date >= relevant.date]
-    if incoming_after:
-        refusal = next((_matches(item.text, stop_words) for item in incoming_after if _matches(item.text, stop_words)), None)
-        blacklist_phrase = next((_matches(item.text, BLACKLIST_WORDS) for item in incoming_after if _matches(item.text, BLACKLIST_WORDS)), None)
+    incoming = [item for item in history if not item.outgoing]
+    if incoming:
+        refusal = next((_matches(item.text, stop_words) for item in incoming if _matches(item.text, stop_words)), None)
+        blacklist_phrase = next((_matches(item.text, BLACKLIST_WORDS) for item in incoming if _matches(item.text, BLACKLIST_WORDS)), None)
         if refusal:
             return Decision(DialogStatus.REFUSAL, f"Клиент написал: «{refusal}»", relevant.date, blacklist_phrase)
-        return Decision(DialogStatus.REPLIED, "После исходящего сообщения есть ответ клиента", relevant.date)
+        return Decision(DialogStatus.REPLIED, "В истории есть входящий ответ клиента", relevant.date)
 
     current = now or datetime.now(timezone.utc)
     date = relevant.date if relevant.date.tzinfo else relevant.date.replace(tzinfo=timezone.utc)
     if current.astimezone(timezone.utc) - date.astimezone(timezone.utc) < min_age:
         return Decision(DialogStatus.TOO_FRESH, "С последнего исходящего сообщения прошло менее 48 часов", relevant.date)
-    return Decision(DialogStatus.CANDIDATE, "Нет ответа, заявки, отказа или прошлого дожима; прошло не менее 48 часов", relevant.date)
+    return Decision(DialogStatus.CANDIDATE, "В истории нет ответа, заявки, отказа или прошлого дожима; прошло не менее 48 часов", relevant.date)

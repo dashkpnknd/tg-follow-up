@@ -18,6 +18,14 @@ class AnalyzerTests(unittest.TestCase):
         history = [self.message(True, "Здравствуйте"), Message(2, NOW - timedelta(hours=71), False, "Сколько стоит?")]
         self.assertEqual(classify(history, now=NOW).status, DialogStatus.REPLIED)
 
+    def test_answer_before_later_outbound_is_still_excluded(self):
+        history = [
+            Message(1, NOW - timedelta(hours=96), True, "Здравствуйте"),
+            Message(2, NOW - timedelta(hours=95), False, "Да, давайте созвонимся"),
+            Message(3, NOW - timedelta(hours=72), True, "Ссылки и материалы"),
+        ]
+        self.assertEqual(classify(history, now=NOW).status, DialogStatus.REPLIED)
+
     def test_application_marker_wins(self):
         self.assertEqual(classify([self.message(True, "@LocalTraffic")], now=NOW).status, DialogStatus.APPLICATION)
 
