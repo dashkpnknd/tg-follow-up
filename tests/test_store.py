@@ -65,6 +65,8 @@ class StoreTests(unittest.TestCase):
             store.record_decision(second["id"], 4, None, None, decision, 4)
             task_id, _ = store.create_task("Continuous", 0)
             store.set_task_enabled(task_id, True)
+            for row in store.pending_revalidation(limit=10):
+                store.mark_validated(row["id"])
             self.assertEqual({row["account_id"] for row in store.pending()}, {first["id"], second["id"]})
 
     def test_unavailable_account_is_removed_from_delivery_queue(self):
@@ -77,10 +79,76 @@ class StoreTests(unittest.TestCase):
             store.record_decision(account["id"], 42, None, None, decision, 42)
             task_id, _ = store.create_task("Continuous", 0)
             store.set_task_enabled(task_id, True)
+            store.mark_validated(store.pending_revalidation()[0]["id"])
             self.assertEqual(len(store.pending()), 1)
             self.assertEqual(store.disable_sending_for_account(account["id"], "auth_error"), 1)
             self.assertEqual(store.pending(), [])
             self.assertEqual(store.account(account["id"])["send_status"], "unavailable")
+
+    def test_rate_limited_account_rejoins_after_cooldown_without_losing_queue(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("session", "Account", "/tmp/session.session")
+            account = store.accounts()[0]
+            store.set_account_auth_status(account["id"], "authorized")
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            store.record_decision(account["id"], 42, None, None, decision, 42)
+            task_id, _ = store.create_task("Continuous", 0)
+            store.set_task_enabled(task_id, True)
+            store.mark_validated(store.pending_revalidation()[0]["id"])
+            row = store.pending()[0]
+            store.mark_queue(row["id"], "sending")
+            store.cooldown_sending_for_account(account["id"], "error:PeerFloodError")
+            self.assertEqual(store.pending(), [])
+            self.assertEqual(store.account(account["id"])["send_status"], "available")
+            with store.connect() as db:
+                db.execute("UPDATE accounts SET cooldown_until=? WHERE id=?", ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), account["id"]))
+            self.assertEqual(len(store.pending()), 1)
+
+    def test_delivery_requires_full_history_validation(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("session", "Account", "/tmp/session.session")
+            account = store.accounts()[0]
+            store.set_account_auth_status(account["id"], "authorized")
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            store.record_decision(account["id"], 42, None, None, decision, 42)
+            task_id, _ = store.create_task("Continuous", 0)
+            store.set_task_enabled(task_id, True)
+            self.assertEqual(store.pending(), [])
+            row = store.pending_revalidation()[0]
+            store.mark_validated(row["id"])
+            self.assertEqual(len(store.pending()), 1)
+
+    def test_restore_authorized_sender_requeues_only_candidates(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("session", "Account", "/tmp/session.session")
+            account = store.accounts()[0]
+            store.set_account_auth_status(account["id"], "authorized")
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            store.record_decision(account["id"], 42, None, None, decision, 42)
+            task_id, _ = store.create_task("Continuous", 0)
+            store.set_task_enabled(task_id, True)
+            store.disable_sending_for_account(account["id"], "error:PeerFloodError")
+            restored = store.restore_authorized_cold_accounts(["session"])
+            self.assertEqual(restored, [account["id"]])
+            self.assertEqual(store.requeue_candidate_dialogs(restored), 1)
+            row = store.pending_revalidation()[0]
+            self.assertEqual(row["peer_id"], 42)
+
+    def test_cold_scan_progress_finishes_only_after_every_account(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("one", "One", "/tmp/one.session")
+            store.import_account("two", "Two", "/tmp/two.session")
+            account_ids = [row["id"] for row in store.accounts()]
+            store.prepare_cold_scan(account_ids)
+            self.assertFalse(store.cold_scan_complete(account_ids))
+            store.complete_cold_scan(account_ids[0])
+            self.assertFalse(store.cold_scan_complete(account_ids))
+            store.complete_cold_scan(account_ids[1])
+            self.assertTrue(store.cold_scan_complete(account_ids))
 
     def test_sent_today_total_counts_all_accounts(self):
         with TemporaryDirectory() as directory:
@@ -95,6 +163,8 @@ class StoreTests(unittest.TestCase):
             store.record_decision(second["id"], 2, None, None, decision, 2)
             task_id, _ = store.create_task("Continuous", 0)
             store.set_task_enabled(task_id, True)
+            for row in store.pending_revalidation(limit=10):
+                store.mark_validated(row["id"])
             rows = store.pending()
             for row in rows:
                 store.mark_sent(row["id"], row["account_id"], row["peer_id"], "Тест")
@@ -129,7 +199,7 @@ class StoreTests(unittest.TestCase):
             store.set_followup_templates(["Третий"])
             self.assertEqual(store.task_templates(task_id), ["Первый", "Второй"])
 
-    def test_revalidation_marks_and_reopens_candidate(self):
+    def test_revalidation_does_not_repeat_for_an_already_audited_candidate(self):
         with TemporaryDirectory() as directory:
             store = Store(Path(directory) / "followup.sqlite3")
             store.import_account("session", "Account", "/tmp/session.session")
@@ -143,7 +213,25 @@ class StoreTests(unittest.TestCase):
             store.mark_validated(row["id"])
             self.assertEqual(store.pending_revalidation(), [])
             store.record_decision(account["id"], 888, None, None, decision, 2)
-            self.assertEqual(len(store.pending_revalidation()), 1)
+            self.assertEqual(store.pending_revalidation(), [])
+
+    def test_cold_followup_sent_to_peer_is_global_across_accounts(self):
+        with TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "followup.sqlite3")
+            store.import_account("one", "One", "/tmp/one.session")
+            store.import_account("two", "Two", "/tmp/two.session")
+            first, second = store.accounts()
+            for account in (first, second):
+                store.set_account_auth_status(account["id"], "authorized")
+            decision = Decision(DialogStatus.CANDIDATE, "safe", datetime.now(timezone.utc) - timedelta(days=3))
+            store.record_decision(first["id"], 42, None, None, decision, 1)
+            task_id, _ = store.create_task("Continuous", 0)
+            store.set_task_enabled(task_id, True)
+            store.mark_validated(store.pending_revalidation()[0]["id"])
+            row = store.pending()[0]
+            store.mark_sent(row["id"], row["account_id"], row["peer_id"], "Тест")
+            self.assertTrue(store.cold_followup_sent_to_peer(42))
+            self.assertFalse(store.cold_followup_sent_to_peer(43))
 
 
 if __name__ == "__main__":

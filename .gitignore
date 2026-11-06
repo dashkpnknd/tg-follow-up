@@ -3,3 +3,18 @@ data/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Local runtime files
+.venv/
+venv/
+sessions/
+backups/
+logs/
+*.session*
+*.sqlite*
+*.db*
+*.log
+*.bak*
+*.before-*
+.unified*/
+*.jsonl
